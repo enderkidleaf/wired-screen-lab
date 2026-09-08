@@ -1,5 +1,7 @@
 # 架构与取舍
 
+> 进度声明：当前实现是有线屏幕读取与投屏原型，不是 Windows 虚拟扩展屏。只有完成后文的 IDD 驱动阶段，Windows 才会识别出新的副显示器。
+
 ## 已实现的数据链路
 
 Windows 浏览器 getDisplayMedia / 1920×1080 canvas.captureStream(60)
