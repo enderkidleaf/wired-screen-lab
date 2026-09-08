@@ -1,0 +1,6 @@
+node_modules/
+artifacts/
+*.log
+.tools/
+native/build/
+native/dist/

@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>有线副屏实验室</title><link rel="stylesheet" href="/style.css"></head>
+<body data-role="host"><main><header><span class="eyebrow">WIRED SCREEN LAB · 01</span><h1>让平板接住你的桌面。</h1><p>第一阶段 · 画面传输原型。目标 1920 × 1080 / 60 fps，实际表现以接收端统计为准。</p></header>
+<section class="card"><div class="sectionhead"><h2>开始连接</h2><span id="status" class="badge">尚未开始</span></div>
+<p>先用 USB 连接安卓平板，在平板设置中开启「USB 网络共享」。电脑端使用 Edge 或 Chrome，并通过 localhost 打开此页。</p>
+<div class="controls"><label>画面侧重<select id="hint"><option value="motion">流畅运动 · 60 帧目标</option><option value="detail">文字清晰 · 帧率可能降低</option></select></label><label>最高码率<select id="bitrate"><option value="20">20 Mbps</option><option value="35">35 Mbps</option><option value="10">10 Mbps</option></select></label><label>编码<select id="codec"><option value="H264">优先 H.264</option><option value="VP8">优先 VP8</option><option value="auto">浏览器自动选择</option></select></label></div>
+<div class="buttons"><button id="start">选择共享画面</button><button id="demo" class="secondary">发送 1080p 动态测试画面</button><button id="stop" class="secondary" disabled>停止</button></div>
+<p class="note">共享已有屏幕用于验证传输；本版本尚未安装虚拟显示驱动，不会自动新增扩展屏。60 fps 是请求值，不是性能承诺。</p>
+<div id="links" hidden><h3>在平板浏览器打开</h3><p>选择 USB 网络共享网卡对应地址，并输入配对码：<strong id="code"></strong></p><div id="addresses"></div><details><summary>电脑本机回环测试</summary><a id="local" target="_blank" rel="noreferrer">打开接收页</a></details></div></section>
+<section class="card"><div class="sectionhead"><h2>传输状态</h2><button id="export" class="secondary" disabled>导出测量记录</button></div><div id="metrics" class="metrics"></div><p id="quality">等待连接后测量。连续动态画面才能检验 60 帧。</p><p id="route" class="note"></p><video id="video" autoplay muted playsinline></video><pre id="log" aria-live="polite"></pre></section>
+<footer>里程碑：传输原型 → USB 实机验证 → Windows 扩展屏驱动 → 1080p60 持续测试</footer></main><script src="/app.js"></script></body></html>

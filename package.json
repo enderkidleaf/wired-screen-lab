@@ -1,0 +1,8 @@
+{
+  "name": "wired-screen-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "1080p60 wired tablet display transport prototype",
+  "scripts": { "start": "node server.cjs", "test": "node --test test/*.test.cjs" },
+  "engines": { "node": ">=22" }
+}
