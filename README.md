@@ -77,4 +77,6 @@
 
 原生版本通过 ADB USB 的 localabstract socket 搬运 H.264 Annex-B 帧；安卓端使用 MediaCodec，并优先启用低延迟解码。PC 端可捕获已有桌面画面；IDD 虚拟显示器驱动已可构建至 `native/dist/idd/`，签名、安装和实际捕获验收仍待完成。
 
+`native/scripts/sign_install_test_idd.ps1` 是用于本机开发验证的下一步：它可开启 Windows 测试签名模式（需要重启）、创建本机自签名证书、将其加入本机信任存储、为驱动包签名并安装。它不能作为面向其他用户的正式驱动分发方案。
+
 小米 MIUI 可能阻止 ADB 安装。需要在手机“开发者选项”中允许 USB 调试和 USB 安装，并解锁手机确认安装；若仍提示 `INSTALL_FAILED_USER_RESTRICTED`，可手动把 `native/dist/WiredScreen.apk` 传到手机安装。安装动作由手机系统确认，不会绕过安全限制。
