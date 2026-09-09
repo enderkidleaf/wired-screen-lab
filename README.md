@@ -4,7 +4,7 @@
 
 **截至当前版本，项目尚未实现 Windows 虚拟扩展屏功能。** 现在实现的是：PC 端读取已有屏幕内容，经过 H.264 编码后通过 USB 传输到安卓设备，再由安卓端解码并投屏显示。Windows 显示设置不会因此出现新的显示器，也不能把窗口拖到一块由本项目创建的虚拟屏幕上。
 
-2026-09-09 更新：PC 程序已增加 IDD 软件设备启动入口，并提供微软官方 IDD 示例的构建脚本；本机尚未安装 WDK，驱动包尚未构建或安装，因此扩展屏仍不能视为可用功能。
+2026-09-09 更新：PC 程序已增加 IDD 软件设备启动入口，并已通过 WDK 28000 工具链构建微软 IDD 示例驱动包（DLL、INF、CAT）。该包尚未签名或安装，因此扩展屏仍不能视为可用功能。
 
 真正的扩展屏需要接入 Windows Indirect Display Driver（IDD/IddCx）。当前代码已能启动 IDD 软件设备，并等待 Windows 确认枚举出示例显示器；安装、签名和实机串流验证仍待完成。相关工作列在 [ROADMAP.md](ROADMAP.md) 的“真正扩展屏”阶段。
 
@@ -59,7 +59,7 @@
 
 ## 原生 USB 版（当前主线）
 
-构建工具会放在项目的 `.tools/` 中，不安装到系统。先运行：
+构建原生 PC/安卓端所需工具会放在项目的 `.tools/` 中。先运行：
 
 `python native/scripts/bootstrap.py`
 
@@ -75,6 +75,6 @@
 
 `WiredScreen.exe --test --seconds 30`
 
-原生版本通过 ADB USB 的 localabstract socket 搬运 H.264 Annex-B 帧；安卓端使用 MediaCodec，并优先启用低延迟解码。PC 端可捕获已有桌面画面；IDD 虚拟显示器的构建、安装和实际捕获验收仍待完成。
+原生版本通过 ADB USB 的 localabstract socket 搬运 H.264 Annex-B 帧；安卓端使用 MediaCodec，并优先启用低延迟解码。PC 端可捕获已有桌面画面；IDD 虚拟显示器驱动已可构建至 `native/dist/idd/`，签名、安装和实际捕获验收仍待完成。
 
 小米 MIUI 可能阻止 ADB 安装。需要在手机“开发者选项”中允许 USB 调试和 USB 安装，并解锁手机确认安装；若仍提示 `INSTALL_FAILED_USER_RESTRICTED`，可手动把 `native/dist/WiredScreen.apk` 传到手机安装。安装动作由手机系统确认，不会绕过安全限制。

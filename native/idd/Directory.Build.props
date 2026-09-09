@@ -1,6 +1,13 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!-- The official WDK NuGet package keeps this experiment reproducible on
-       machines where the full Windows Kits installation is still downloading. -->
-  <Import Project="$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget\build\native\Microsoft.Windows.WDK.x64.props"
-          Condition="Exists('$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <!-- Use Microsoft\'s project-local NuGet kits. They make the WDK/SDK version
+       reproducible even when the machine-wide Windows Kits installer is absent. -->
+  <PropertyGroup>
+    <WDKBuildFolder>10.0.28000.0</WDKBuildFolder>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget-28000\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget-28000\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\.tools\sdk-nuget-28000\build\native\Microsoft.Windows.SDK.cpp.x64.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\.tools\sdk-nuget-28000\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\.tools\sdk-core-nuget-28000\build\native\Microsoft.Windows.SDK.cpp.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\.tools\sdk-core-nuget-28000\build\native\Microsoft.Windows.SDK.cpp.props')" />
 </Project>

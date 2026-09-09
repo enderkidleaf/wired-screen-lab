@@ -1,0 +1,12 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- The Microsoft sample enables PREfast as warnings-as-errors.  In a
+       non-ASCII workspace path the analyzer fails to read its rule set, while
+       normal compilation works.  Keep the build deterministic and leave full
+       PREfast analysis to a CI path with an ASCII work directory. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <EnablePREfast>false</EnablePREfast>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
