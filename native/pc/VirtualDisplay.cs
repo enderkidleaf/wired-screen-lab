@@ -1,9 +1,44 @@
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace WiredScreen {
+    public sealed class VirtualDisplayTarget {
+        public string DeviceName;
+        public string DeviceString;
+        public bool AttachedToDesktop;
+    }
+    public static class DisplayTopology {
+        private const uint AttachedToDesktop=0x00000001;
+        [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
+        private struct DisplayDevice {
+            public int cb;
+            [MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string DeviceName;
+            [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceString;
+            public int StateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceId;
+            [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceKey;
+        }
+        [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+        private static extern bool EnumDisplayDevices(string deviceName,uint deviceNumber,ref DisplayDevice displayDevice,uint flags);
+        public static VirtualDisplayTarget WaitForSampleDisplay(int timeoutMilliseconds) {
+            DateTime deadline=DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+            do {
+                for(uint index=0;;index++) {
+                    DisplayDevice device=new DisplayDevice();device.cb=Marshal.SizeOf(typeof(DisplayDevice));
+                    if(!EnumDisplayDevices(null,index,ref device,0))break;
+                    string identity=(device.DeviceString??String.Empty)+" "+(device.DeviceId??String.Empty);
+                    if(identity.IndexOf("IddSample",StringComparison.OrdinalIgnoreCase)>=0) {
+                        return new VirtualDisplayTarget{DeviceName=device.DeviceName,DeviceString=device.DeviceString,AttachedToDesktop=(device.StateFlags&AttachedToDesktop)!=0};
+                    }
+                }
+                Thread.Sleep(200);
+            } while(DateTime.UtcNow<deadline);
+            return null;
+        }
+    }
     // This class creates the software device consumed by the Microsoft IddCx
     // reference driver. The handle stays open for the lifetime of the virtual
     // monitor, so closing it cleanly unplugs the Windows display.
@@ -14,6 +49,7 @@ namespace WiredScreen {
         private IntPtr device=IntPtr.Zero;
         private CreationCallback callback;
         private CreationState state;
+        private VirtualDisplayTarget target;
 
         [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
         private struct CreateInfo {
@@ -36,8 +72,8 @@ namespace WiredScreen {
         private static extern void SwDeviceClose(IntPtr device);
 
         public bool IsRunning { get { return device!=IntPtr.Zero; } }
-        public void Start() {
-            if(IsRunning)return;
+        public VirtualDisplayTarget Start() {
+            if(IsRunning)return target;
             state=new CreationState();callback=Created;
             GCHandle handle=GCHandle.Alloc(state);
             try {
@@ -53,6 +89,9 @@ namespace WiredScreen {
                 if(hr<0)throw new Win32Exception(hr,"无法创建虚拟显示设备。请先安装已签名的 IDD 驱动包。");
                 if(!state.Done.WaitOne(10000))throw new TimeoutException("等待 Windows 加载虚拟显示驱动超时。");
                 if(state.Result<0)throw new Win32Exception(state.Result,"Windows 未能加载虚拟显示驱动。");
+                target=DisplayTopology.WaitForSampleDisplay(10000);
+                if(target==null)throw new IOException("Windows 已接受设备请求，但 10 秒内没有枚举 IddSample 显示器。");
+                return target;
             } catch {
                 if(device!=IntPtr.Zero){SwDeviceClose(device);device=IntPtr.Zero;}
                 throw;
@@ -64,7 +103,7 @@ namespace WiredScreen {
         }
         public void Dispose() {
             if(device!=IntPtr.Zero){SwDeviceClose(device);device=IntPtr.Zero;}
-            if(state!=null){state.Done.Dispose();state=null;}callback=null;
+            if(state!=null){state.Done.Dispose();state=null;}callback=null;target=null;
         }
     }
 }

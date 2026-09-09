@@ -30,9 +30,9 @@ Windows 新增一个真正的扩展显示器，通过 USB 向三星 Tab S4 传�
 
 - Node.js 24、本机 Edge、Visual Studio Build Tools 已找到。
 - Windows SDK 存在；未找到 IddCx 头文件，不能把 SDK 视为已经具备 WDK。
-- 尚未检测到 USB 网络共享网卡。
+- 原生 ADB USB 通道不需要 USB 网络共享；浏览器原型才需要它。
 - 未安装或修改任何系统显示驱动。
 
 ## 下一次继续
 
-先运行测试，查看 `artifacts/loopback-receiver.json` 与 `artifacts/loopback-sender.json`。接小米开启 USB 网络共享，启动服务，在手机打开 USB 网卡对应配对链接。完成 USB 链路和性能定位后再推进 IDD；不要提前宣布扩展副屏完成。
+先安装 WDK，运行 `native/scripts/build_idd.ps1` 构建并签名驱动包，再在 Windows 枚举出 IDD 显示器后验证现有 ADB USB 视频链路能否捕获并发送该显示器。未完成真实 1080p60 测量前，不宣布扩展副屏完成。

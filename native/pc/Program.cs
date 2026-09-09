@@ -24,7 +24,7 @@ namespace WiredScreen {
             foreach(Button b in new[]{install,virtualStart,virtualStop,start,stop}){b.Width=150;b.Height=38;b.BackColor=Color.FromArgb(145,229,194);b.ForeColor=Color.FromArgb(10,30,25);buttons.Controls.Add(b);}layout.Controls.Add(buttons,0,2);
             log.Multiline=true;log.ReadOnly=true;log.ScrollBars=ScrollBars.Vertical;log.Dock=DockStyle.Fill;log.BackColor=Color.FromArgb(8,15,25);log.ForeColor=Color.FromArgb(190,218,220);layout.Controls.Add(log,0,3);
             install.Click+=async(s,e)=>{install.Enabled=false;try{using(Engine x=new Engine()){x.Log=Write;await Task.Run(()=>x.Install());}}catch(Exception ex){Write(ex.Message);}finally{install.Enabled=true;}};
-            virtualStart.Click+=(s,e)=>{try{virtualDisplay=new VirtualDisplayController();virtualDisplay.Start();virtualStart.Enabled=false;virtualStop.Enabled=true;Write("已注册 Windows 虚拟显示器。到“显示设置”选择扩展模式，再选择它对应的屏幕索引开始投屏。");}catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("虚拟副屏未启动："+ex.Message+" 需先用 native/scripts/build_idd.ps1 构建并安装 WDK 签名的驱动包。");}};
+            virtualStart.Click+=(s,e)=>{try{virtualDisplay=new VirtualDisplayController();VirtualDisplayTarget target=virtualDisplay.Start();virtualStart.Enabled=false;virtualStop.Enabled=true;Write("Windows 已枚举 "+target.DeviceString+"（"+target.DeviceName+"）。请在“显示设置”选择扩展模式，再手动选择可用的屏幕索引开始投屏。");}catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("虚拟副屏未启动："+ex.Message+" 需先用 native/scripts/build_idd.ps1 构建并安装 WDK 签名的驱动包。");}};
             virtualStop.Click+=(s,e)=>{if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}virtualStart.Enabled=true;virtualStop.Enabled=false;Write("虚拟显示器已移除。");};
             start.Click+=async(s,e)=>{
                 start.Enabled=false;install.Enabled=false;stop.Enabled=true;
@@ -46,11 +46,6 @@ namespace WiredScreen {
                     Options options=new Options{Source=Array.IndexOf(args,"--desktop")>=0?"desktop":"test",Seconds=30};
                     for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);}
                     using(Engine engine=new Engine()){Console.CancelKeyPress+=(s,e)=>{e.Cancel=true;engine.Stop();};engine.Run(options);}return 0;
-                }
-                if(Array.IndexOf(args,"--virtual")>=0){
-                    Options options=new Options{Source="desktop",Seconds=30,Screen=1};
-                    for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);}
-                    using(VirtualDisplayController display=new VirtualDisplayController())using(Engine engine=new Engine()){display.Start();engine.Run(options);}return 0;
                 }
                 Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainWindow());return 0;
             }catch(Exception ex){Console.Error.WriteLine(ex.Message);return 1;}

@@ -6,13 +6,12 @@
 
 2026-09-09 更新：PC 程序已增加 IDD 软件设备启动入口，并提供微软官方 IDD 示例的构建脚本；本机尚未安装 WDK，驱动包尚未构建或安装，因此扩展屏仍不能视为可用功能。
 
-真正的扩展屏需要后续接入 Windows Indirect Display Driver（IDD/IddCx），让系统把虚拟显示器的 SwapChain 交给传输模块。相关工作列在 [ROADMAP.md](ROADMAP.md) 的“真正扩展屏”阶段。
+真正的扩展屏需要接入 Windows Indirect Display Driver（IDD/IddCx）。当前代码已能启动 IDD 软件设备，并等待 Windows 确认枚举出示例显示器；安装、签名和实机串流验证仍待完成。相关工作列在 [ROADMAP.md](ROADMAP.md) 的“真正扩展屏”阶段。
 
 目标：Windows 通过 USB 向三星 Tab S4 提供 **1920×1080、60 fps 扩展桌面**。
 现阶段可用小米 15S Pro 验证传输，最终性能必须在 Tab S4 复测。
 
-当前是 **画面传输原型**：Node.js 本地配对服务 + 浏览器 WebRTC 视频，支持 USB 网络共享形成的局域网。
-不是已经完成的扩展屏产品：本版本不创建虚拟显示器、不回传触控、不包含音频，也尚未完成 USB 真机验收。
+下面的 Node.js + 浏览器 WebRTC 内容是**历史网络原型**，仅保留用于回溯；当前开发主线是后文的原生 ADB USB 版。
 
 ## 启动
 
@@ -76,6 +75,6 @@
 
 `WiredScreen.exe --test --seconds 30`
 
-原生版本通过 ADB USB 的 localabstract socket 搬运 H.264 Annex-B 帧；安卓端使用 MediaCodec，并优先启用低延迟解码。PC 端的默认测试源是 1920×1080@60 动态画面，后续再接 Windows Desktop Duplication/IDD。
+原生版本通过 ADB USB 的 localabstract socket 搬运 H.264 Annex-B 帧；安卓端使用 MediaCodec，并优先启用低延迟解码。PC 端可捕获已有桌面画面；IDD 虚拟显示器的构建、安装和实际捕获验收仍待完成。
 
 小米 MIUI 可能阻止 ADB 安装。需要在手机“开发者选项”中允许 USB 调试和 USB 安装，并解锁手机确认安装；若仍提示 `INSTALL_FAILED_USER_RESTRICTED`，可手动把 `native/dist/WiredScreen.apk` 传到手机安装。安装动作由手机系统确认，不会绕过安全限制。
