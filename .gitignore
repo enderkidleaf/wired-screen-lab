@@ -4,3 +4,4 @@ artifacts/
 .tools/
 native/build/
 native/dist/
+native/idd/upstream/

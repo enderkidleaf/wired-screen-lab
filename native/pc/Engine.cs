@@ -14,6 +14,31 @@ namespace WiredScreen {
         public string Source="test",Encoder="auto";
         public int Screen=0,Bitrate=20,Seconds=0;
     }
+    // A latency-first mailbox.  Video is live data: once a newer frame exists,
+    // sending an older one can only make the picture feel further behind.
+    public sealed class LatestFrameMailbox {
+        private readonly object gate=new object();
+        private byte[] latest;
+        private bool completed;
+        private long dropped;
+        public long Dropped { get { return Interlocked.Read(ref dropped); } }
+        public void Publish(byte[] frame) {
+            lock(gate) {
+                if(completed)return;
+                if(latest!=null)Interlocked.Increment(ref dropped);
+                latest=frame;
+                Monitor.Pulse(gate);
+            }
+        }
+        public bool Take(out byte[] frame) {
+            lock(gate) {
+                while(latest==null&&!completed)Monitor.Wait(gate);
+                if(latest==null){frame=null;return false;}
+                frame=latest;latest=null;return true;
+            }
+        }
+        public void Complete() { lock(gate){completed=true;Monitor.PulseAll(gate);} }
+    }
     public sealed class Engine : IDisposable {
         private readonly string root=AppDomain.CurrentDomain.BaseDirectory;
         public Action<string> Log=Console.WriteLine;
@@ -26,6 +51,7 @@ namespace WiredScreen {
         private long sent=0;
         private double rtt=0;
         private StreamWriter report;
+        private LatestFrameMailbox frames;
         public static string Command(string file,string args,int timeout){
             ProcessStartInfo info=new ProcessStartInfo(file,args){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
             using(Process p=Process.Start(info)){
@@ -49,7 +75,7 @@ namespace WiredScreen {
             string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size=1920x1080:rate=60":"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60";
             string filter=options.Source=="test"?"format=yuv420p":"hwdownload,format=bgra,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p";
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
-            return "-hide_banner -loglevel warning -nostdin "+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M -bufsize "+options.Bitrate+"M -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
+            return "-hide_banner -loglevel warning -nostdin "+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M -bufsize "+options.Bitrate+"M -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
         }
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
@@ -74,16 +100,16 @@ namespace WiredScreen {
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
             report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",transport="adb-usb-localabstract",source=options.Source,encoder=codec,width=1920,height=1080,targetFps=60}));
             Log("USB 视频通道已连接。编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
-            BlockingCollection<byte[]> frames=new BlockingCollection<byte[]>(3);
+            frames=new LatestFrameMailbox();
             ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,"ffmpeg.exe"),Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
             encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
             Task reader=Task.Run(()=>{
                 try{
-                    AnnexBFramer framer=new AnnexBFramer(bytes=>{if(!stopped&&!frames.TryAdd(bytes,250))throw new IOException("USB 接收过慢，已停止以避免延迟积压");});
+                    AnnexBFramer framer=new AnnexBFramer(bytes=>{if(!stopped)frames.Publish(bytes);});
                     byte[] buffer=new byte[65536];int count;
                     while(!stopped&&(count=encoder.StandardOutput.BaseStream.Read(buffer,0,buffer.Length))>0)framer.Feed(buffer,count);
                     if(!stopped)framer.Finish();
-                }finally{frames.CompleteAdding();}
+                }finally{frames.Complete();}
             });
             Task telemetry=Task.Run(()=>{
                 try{while(!stopped){
@@ -99,7 +125,8 @@ namespace WiredScreen {
             });
             Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;
             try{
-                foreach(byte[] frame in frames.GetConsumingEnumerable()){
+                byte[] frame;
+                while(frames.Take(out frame)){
                     if(stopped)break;
                     Wire.Write(network,1,sequence,Stopwatch.GetTimestamp(),frame);Interlocked.Increment(ref sent);
                     if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
@@ -110,11 +137,13 @@ namespace WiredScreen {
             }finally{
                 Stop();try{Task.WaitAll(new[]{reader,telemetry},5000);}catch{}
                 lock(gate){if(report!=null){report.Dispose();report=null;}}
-                Log("传输已停止，已发送 "+sent+" 帧。");
+                Log("传输已停止，已发送 "+sent+" 帧；为保持低延迟丢弃过期帧 "+frames.Dropped+" 帧。");
+                frames=null;
             }
         }
         public void Stop(){
             stopped=true;
+            if(frames!=null)frames.Complete();
             try{if(client!=null)client.Close();}catch{}
             try{if(encoder!=null&&!encoder.HasExited)encoder.Kill();}catch{}
         }

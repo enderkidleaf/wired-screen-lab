@@ -67,7 +67,11 @@ namespace WiredScreen {
             if(packet.Sequence!=42||packet.Stamp!=12345||packet.Data.Length!=source.Length)throw new Exception("Packet round trip");
             byte[] bad=new byte[20];Buffer.BlockCopy(BitConverter.GetBytes(-1),0,bad,4,4);
             try{Wire.Read(new MemoryStream(bad));throw new Exception("Negative size accepted");}catch(InvalidDataException){}
-            Console.WriteLine("PASS: Annex-B chunk boundaries, packet round trip, malformed size");
+            LatestFrameMailbox mailbox=new LatestFrameMailbox();
+            mailbox.Publish(new byte[]{1});mailbox.Publish(new byte[]{2});byte[] latest;
+            if(!mailbox.Take(out latest)||latest[0]!=2||mailbox.Dropped!=1)throw new Exception("Latest-frame mailbox retained stale video");
+            mailbox.Complete();if(mailbox.Take(out latest))throw new Exception("Completed mailbox yielded a frame");
+            Console.WriteLine("PASS: Annex-B chunk boundaries, packet round trip, malformed size, latest-frame delivery");
         }
     }
 }
