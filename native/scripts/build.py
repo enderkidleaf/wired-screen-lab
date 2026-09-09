@@ -12,6 +12,7 @@ def run(args):
     subprocess.run([argument(x) for x in args],check=True,cwd=ROOT)
 def main():
     BUILD.mkdir(exist_ok=True);DIST.mkdir(exist_ok=True)
+    run(['cmd.exe','/c',NATIVE/'scripts'/'build_bridge.cmd'])
     jdk=find(TOOLS/'jdk','javac.exe').parent
     android=find(TOOLS/'android-platform','android.jar')
     bt=find(TOOLS/'android-build-tools','aapt2.exe').parent

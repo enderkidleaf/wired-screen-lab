@@ -11,6 +11,12 @@ namespace WiredScreen {
         public bool AttachedToDesktop;
     }
     public static class DisplayTopology {
+        [DllImport("user32.dll",ExactSpelling=true)]
+        private static extern int SetDisplayConfig(uint paths,IntPtr path,uint modes,IntPtr mode,uint flags);
+        public static void ExtendDesktop() {
+            int result=SetDisplayConfig(0,IntPtr.Zero,0,IntPtr.Zero,0x84); // SDC_APPLY | SDC_TOPOLOGY_EXTEND
+            if(result!=0)throw new Win32Exception(result,"Windows 无法启用扩展桌面。");
+        }
         private const uint AttachedToDesktop=0x00000001;
         [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
         private struct DisplayDevice {
@@ -66,7 +72,7 @@ namespace WiredScreen {
         [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet=CharSet.Unicode)]
         private delegate void CreationCallback(IntPtr swDevice,int creationResult,IntPtr context,[MarshalAs(UnmanagedType.LPWStr)] string instanceId);
         private sealed class CreationState { public readonly ManualResetEvent Done=new ManualResetEvent(false); public int Result; }
-        [DllImport("cfgmgr32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)]
+        [DllImport("WiredScreen.Native.dll",EntryPoint="WiredScreenSwDeviceCreate",CharSet=CharSet.Unicode,ExactSpelling=true)]
         private static extern int SwDeviceCreate(string enumerator,string parent,ref CreateInfo info,uint propertyCount,IntPtr properties,CreationCallback callback,IntPtr context,out IntPtr device);
         [DllImport("cfgmgr32.dll",ExactSpelling=true)]
         private static extern void SwDeviceClose(IntPtr device);
