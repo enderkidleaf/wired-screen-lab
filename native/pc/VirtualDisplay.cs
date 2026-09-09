@@ -66,9 +66,9 @@ namespace WiredScreen {
         [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet=CharSet.Unicode)]
         private delegate void CreationCallback(IntPtr swDevice,int creationResult,IntPtr context,[MarshalAs(UnmanagedType.LPWStr)] string instanceId);
         private sealed class CreationState { public readonly ManualResetEvent Done=new ManualResetEvent(false); public int Result; }
-        [DllImport("swdevice.dll",CharSet=CharSet.Unicode,ExactSpelling=true)]
+        [DllImport("cfgmgr32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)]
         private static extern int SwDeviceCreate(string enumerator,string parent,ref CreateInfo info,uint propertyCount,IntPtr properties,CreationCallback callback,IntPtr context,out IntPtr device);
-        [DllImport("swdevice.dll",ExactSpelling=true)]
+        [DllImport("cfgmgr32.dll",ExactSpelling=true)]
         private static extern void SwDeviceClose(IntPtr device);
 
         public bool IsRunning { get { return device!=IntPtr.Zero; } }
@@ -86,7 +86,7 @@ namespace WiredScreen {
                     description="WiredScreen Virtual Display"
                 };
                 int hr=SwDeviceCreate("IddSampleDriver","HTREE\\ROOT\\0",ref info,0,IntPtr.Zero,callback,GCHandle.ToIntPtr(handle),out device);
-                if(hr<0)throw new Win32Exception(hr,"无法创建虚拟显示设备。请先安装已签名的 IDD 驱动包。");
+                if(hr<0)throw new Win32Exception(hr,"无法创建虚拟显示设备 (HRESULT 0x"+hr.ToString("X8")+")。");
                 if(!state.Done.WaitOne(10000))throw new TimeoutException("等待 Windows 加载虚拟显示驱动超时。");
                 if(state.Result<0)throw new Win32Exception(state.Result,"Windows 未能加载虚拟显示驱动。");
                 target=DisplayTopology.WaitForSampleDisplay(10000);

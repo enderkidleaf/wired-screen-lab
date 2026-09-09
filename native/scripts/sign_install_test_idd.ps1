@@ -59,7 +59,7 @@ if ($PSCmdlet.ShouldProcess('LocalMachine\\TrustedPublisher', 'Trust the local t
     Import-Certificate -FilePath $certificateFile -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
 }
 if ($PSCmdlet.ShouldProcess($catalog.FullName, 'Sign the IDD catalog with the local test certificate')) {
-    & $signTool sign /fd SHA256 /sha1 $certificate.Thumbprint $catalog.FullName
+    & $signTool sign /sm /s My /fd SHA256 /sha1 $certificate.Thumbprint $catalog.FullName
     if ($LASTEXITCODE -ne 0) { throw 'Catalog signing failed.' }
 }
 if ($PSCmdlet.ShouldProcess($inf, 'Install the signed virtual-display driver')) {
