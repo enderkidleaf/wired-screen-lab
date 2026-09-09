@@ -16,8 +16,12 @@ if (-not (Test-Path $solution)) {
 $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
 $kits = Join-Path $programFilesX86 'Windows Kits\10\Include'
 $iddcx = Get-ChildItem $kits -Recurse -Filter iddcx.h -ErrorAction SilentlyContinue | Select-Object -First 1
+$nugetHeader = Join-Path $root '.tools\wdk-nuget\c\Include\10.0.26100.0\um\iddcx\1.0\IddCx.h'
 if ($null -eq $iddcx) {
-    throw 'WDK IddCx headers were not found. Install Windows Driver Kit through Visual Studio Installer, then retry.'
+    if (-not (Test-Path $nugetHeader)) {
+        throw 'WDK IddCx headers were not found. Install Windows Driver Kit or run the project bootstrap to acquire the official WDK NuGet package.'
+    }
+    Write-Host 'Using the project-local official WDK NuGet package.'
 }
 
 $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -26,6 +30,16 @@ $vs = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools
 if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual Studio C++ tools were not found.' }
 $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
 if (-not (Test-Path $msbuild)) { throw 'MSBuild was not found.' }
+
+# The headers in the WDK NuGet package are enough for code completion, but the
+# official sample also needs Visual Studio's WDK platform toolset.  Check it
+# explicitly so a partial WDK installation produces an actionable message.
+$vsMajor = Split-Path (Split-Path $vs -Parent) -Leaf
+$vcToolsRoot = Join-Path $vs "MSBuild\Microsoft\VC\v${vsMajor}0\Platforms\$Platform\PlatformToolsets"
+$driverToolset = Join-Path $vcToolsRoot 'WindowsUserModeDriver10.0'
+if (-not (Test-Path $driverToolset)) {
+    throw "The WindowsUserModeDriver10.0 platform toolset is not installed for Visual Studio. Complete the Windows Driver Kit installation (including Visual Studio integration), then retry. Expected: $driverToolset"
+}
 
 & $msbuild $solution "/p:Configuration=$Configuration" "/p:Platform=$Platform" /m
 if ($LASTEXITCODE -ne 0) { throw 'IDD driver build failed.' }

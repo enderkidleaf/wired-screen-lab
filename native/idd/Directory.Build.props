@@ -1,0 +1,6 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- The official WDK NuGet package keeps this experiment reproducible on
+       machines where the full Windows Kits installation is still downloading. -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\.tools\wdk-nuget\build\native\Microsoft.Windows.WDK.x64.props')" />
+</Project>
