@@ -1,6 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [switch]$EnableTestSigning
+    [switch]$EnableTestSigning,
+    [switch]$UseExistingTrustedCertificate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +41,14 @@ $subject = 'CN=WiredScreen Test Driver'
 $certificate = Get-ChildItem 'Cert:\LocalMachine\My' |
     Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } |
     Select-Object -First 1
+if ($UseExistingTrustedCertificate) {
+    if ($null -eq $certificate) { throw 'No existing signing certificate was found.' }
+    foreach ($store in @('Root','TrustedPublisher')) {
+        if (-not (Test-Path ("Cert:\LocalMachine\" + $store + '\' + $certificate.Thumbprint))) {
+            throw "The existing certificate is not trusted in $store."
+        }
+    }
+}
 if ($null -eq $certificate) {
     if ($PSCmdlet.ShouldProcess('LocalMachine\\My', "Create $subject code-signing certificate")) {
         $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject `
@@ -49,13 +58,13 @@ if ($null -eq $certificate) {
 }
 
 $certificateFile = Join-Path $package 'WiredScreenTestDriver.cer'
-if ($PSCmdlet.ShouldProcess($certificateFile, 'Export the public test certificate')) {
+if (-not $UseExistingTrustedCertificate -and $PSCmdlet.ShouldProcess($certificateFile, 'Export the public test certificate')) {
     Export-Certificate -Cert $certificate -FilePath $certificateFile | Out-Null
 }
-if ($PSCmdlet.ShouldProcess('LocalMachine\\Root', 'Trust the local test certificate root')) {
+if (-not $UseExistingTrustedCertificate -and $PSCmdlet.ShouldProcess('LocalMachine\\Root', 'Trust the local test certificate root')) {
     Import-Certificate -FilePath $certificateFile -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
 }
-if ($PSCmdlet.ShouldProcess('LocalMachine\\TrustedPublisher', 'Trust the local test driver publisher')) {
+if (-not $UseExistingTrustedCertificate -and $PSCmdlet.ShouldProcess('LocalMachine\\TrustedPublisher', 'Trust the local test driver publisher')) {
     Import-Certificate -FilePath $certificateFile -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
 }
 if ($PSCmdlet.ShouldProcess($catalog.FullName, 'Sign the IDD catalog with the local test certificate')) {

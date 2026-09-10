@@ -47,6 +47,7 @@ if (-not (Test-Path $driverToolset)) {
 }
 
 $directoryProps = Join-Path $root 'native\idd\Directory.Build.props'
+& (Join-Path $PSScriptRoot 'configure_idd.ps1')
 $analysisOverride = Join-Path $root 'native\idd\NoStaticAnalysis.targets'
 & $msbuild $solution "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:WindowsTargetPlatformVersion=10.0.28000.0" "/p:EnableTestSign=false" "/p:RunCodeAnalysis=false" "/p:DirectoryBuildPropsPath=$directoryProps" "/p:ForceImportAfterCppTargets=$analysisOverride" /m
 if ($LASTEXITCODE -ne 0) { throw 'IDD driver build failed.' }
