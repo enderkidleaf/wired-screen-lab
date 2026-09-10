@@ -69,7 +69,7 @@ namespace WiredScreen {
                 }
                 if(Array.IndexOf(args,"--test")>=0||Array.IndexOf(args,"--desktop")>=0){
                     Options options=new Options{Source=Array.IndexOf(args,"--desktop")>=0?"desktop":"test",Seconds=30};
-                    for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);}
+                    for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);if(args[i]=="--vbv-frames")options.VbvFrames=int.Parse(args[i+1]);}
                     using(Engine engine=new Engine()){Console.CancelKeyPress+=(s,e)=>{e.Cancel=true;engine.Stop();};engine.Run(options);}return 0;
                 }
                 Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainWindow());return 0;
