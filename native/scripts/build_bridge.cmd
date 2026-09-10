@@ -7,5 +7,5 @@ if not defined VSINSTALL exit /b 1
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
 cd /d "%~dp0..\.."
-cl /nologo /LD /MT /EHsc /O2 native\pc\SwDeviceBridge.cpp /Fo:native\build\SwDeviceBridge.obj /link Swdevice.lib /OUT:native\dist\WiredScreen.Native.dll /IMPLIB:native\build\WiredScreen.Native.lib
+cl /nologo /LD /MT /EHsc /O2 native\pc\SwDeviceBridge.cpp /Fo:native\build\SwDeviceBridge.obj /link Swdevice.lib dxgi.lib /OUT:native\dist\WiredScreen.Native.dll /IMPLIB:native\build\WiredScreen.Native.lib
 exit /b %errorlevel%

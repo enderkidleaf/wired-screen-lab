@@ -12,6 +12,7 @@ namespace WiredScreen {
     public sealed class Options {
         public string Source="test",Encoder="auto";
         public int Screen=0,Bitrate=20,Seconds=0;
+        public int Adapter=-1;
     }
     // A latency-first mailbox.  Video is live data: once a newer frame exists,
     // sending an older one can only make the picture feel further behind.
@@ -74,7 +75,7 @@ namespace WiredScreen {
             string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size=1920x1080:rate=60":"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60";
             string filter=options.Source=="test"?"format=yuv420p":"hwdownload,format=bgra,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p";
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
-            return "-hide_banner -loglevel warning -nostdin "+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M -bufsize "+options.Bitrate+"M -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
+            return "-hide_banner -loglevel warning -nostdin "+(options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"")+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M -bufsize "+options.Bitrate+"M -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
         }
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");

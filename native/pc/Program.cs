@@ -24,12 +24,12 @@ namespace WiredScreen {
             foreach(Button b in new[]{install,virtualStart,virtualStop,start,stop}){b.Width=150;b.Height=38;b.BackColor=Color.FromArgb(145,229,194);b.ForeColor=Color.FromArgb(10,30,25);buttons.Controls.Add(b);}layout.Controls.Add(buttons,0,2);
             log.Multiline=true;log.ReadOnly=true;log.ScrollBars=ScrollBars.Vertical;log.Dock=DockStyle.Fill;log.BackColor=Color.FromArgb(8,15,25);log.ForeColor=Color.FromArgb(190,218,220);layout.Controls.Add(log,0,3);
             install.Click+=async(s,e)=>{install.Enabled=false;try{using(Engine x=new Engine()){x.Log=Write;await Task.Run(()=>x.Install());}}catch(Exception ex){Write(ex.Message);}finally{install.Enabled=true;}};
-            virtualStart.Click+=(s,e)=>{try{virtualDisplay=new VirtualDisplayController();VirtualDisplayTarget target=virtualDisplay.Start();DisplayTopology.ExtendDesktop();virtualStart.Enabled=false;virtualStop.Enabled=true;Write("Windows 已枚举 "+target.DeviceString+"（"+target.DeviceName+"）。已请求扩展桌面；请核对“显示设置”，再选择可用的屏幕索引开始投屏。");}catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("虚拟副屏未启动："+ex.Message+" 需先用 native/scripts/build_idd.ps1 构建并安装 WDK 签名的驱动包。");}};
+            virtualStart.Click+=(s,e)=>{try{virtualDisplay=new VirtualDisplayController();VirtualDisplayTarget target=virtualDisplay.Start();DisplayTopology.ExtendDesktop();source.SelectedIndex=1;virtualStart.Enabled=false;virtualStop.Enabled=true;Write("Windows 已枚举 "+target.DeviceString+"（"+target.DeviceName+"）。已请求扩展桌面；请核对“显示设置”，再选择可用的屏幕索引开始投屏。");}catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("虚拟副屏未启动："+ex.Message+" 需先用 native/scripts/build_idd.ps1 构建并安装 WDK 签名的驱动包。");}};
             virtualStop.Click+=(s,e)=>{if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}virtualStart.Enabled=true;virtualStop.Enabled=false;Write("虚拟显示器已移除。");};
             start.Click+=async(s,e)=>{
                 start.Enabled=false;install.Enabled=false;stop.Enabled=true;
                 Options o=new Options{Source=source.SelectedIndex==0?"test":"desktop",Encoder=codec.Text,Screen=(int)screen.Value};
-                engine=new Engine{Log=Write};try{await Task.Run(()=>engine.Run(o));}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
+                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
             };
             stop.Click+=(s,e)=>{if(engine!=null)engine.Stop();};
             FormClosing+=(s,e)=>{if(engine!=null)engine.Stop();if(virtualDisplay!=null)virtualDisplay.Dispose();};
@@ -42,6 +42,22 @@ namespace WiredScreen {
             try{
                 if(Array.IndexOf(args,"--self-test")>=0){ProtocolTests.Run();return 0;}
                 if(Array.IndexOf(args,"--install")>=0){using(Engine engine=new Engine())engine.Install();return 0;}
+                if(Array.IndexOf(args,"--virtual")>=0){
+                    int seconds=30;
+                    for(int i=0;i<args.Length-1;i++)if(args[i]=="--seconds")seconds=int.Parse(args[i+1]);
+                    using(VirtualDisplayController display=new VirtualDisplayController()) {
+                        VirtualDisplayTarget target=display.Start();
+                        System.Threading.Thread.Sleep(10000);
+                        DisplayTopology.ExtendDesktop();
+                        System.Threading.Thread.Sleep(2000);
+                        uint adapter,output;
+                        int hr=DisplayTopology.WiredScreenFindOutput(target.DeviceName,out adapter,out output);
+                        if(hr<0)throw new Exception("虚拟屏没有可用的 DXGI 捕获输出：0x"+hr.ToString("X8"));
+                        Console.WriteLine("虚拟屏 "+target.DeviceName+" adapter="+adapter+" output="+output);
+                        using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds});
+                    }
+                    return 0;
+                }
                 if(Array.IndexOf(args,"--test")>=0||Array.IndexOf(args,"--desktop")>=0){
                     Options options=new Options{Source=Array.IndexOf(args,"--desktop")>=0?"desktop":"test",Seconds=30};
                     for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);}

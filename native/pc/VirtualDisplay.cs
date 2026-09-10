@@ -11,6 +11,8 @@ namespace WiredScreen {
         public bool AttachedToDesktop;
     }
     public static class DisplayTopology {
+        [DllImport("WiredScreen.Native.dll",CharSet=CharSet.Unicode,ExactSpelling=true)]
+        public static extern int WiredScreenFindOutput(string name,out uint adapter,out uint output);
         [DllImport("user32.dll",ExactSpelling=true)]
         private static extern int SetDisplayConfig(uint paths,IntPtr path,uint modes,IntPtr mode,uint flags);
         public static void ExtendDesktop() {
