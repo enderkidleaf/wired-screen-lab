@@ -48,8 +48,9 @@ namespace WiredScreen {
                 if(Array.IndexOf(args,"--self-test")>=0){ProtocolTests.Run();return 0;}
                 if(Array.IndexOf(args,"--install")>=0){using(Engine engine=new Engine())engine.Install();return 0;}
                 if(Array.IndexOf(args,"--virtual")>=0){
-                    int seconds=30;
-                    for(int i=0;i<args.Length-1;i++)if(args[i]=="--seconds")seconds=int.Parse(args[i+1]);
+                    int seconds=30,vbvFrames=0;
+                    for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")seconds=int.Parse(args[i+1]);if(args[i]=="--vbv-frames")vbvFrames=int.Parse(args[i+1]);}
+                    if(vbvFrames<0||vbvFrames>4)throw new ArgumentOutOfRangeException("--vbv-frames");
                     using(VirtualDisplayController display=new VirtualDisplayController()) {
                         VirtualDisplayTarget target=display.Start();
                         System.Threading.Thread.Sleep(10000);
@@ -62,7 +63,7 @@ namespace WiredScreen {
                         System.Diagnostics.Process pattern=null;
                         try {
                             if(Array.IndexOf(args,"--dynamic")>=0)pattern=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,"--pattern --display "+target.DeviceName){UseShellExecute=false});
-                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds});
+                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds,VbvFrames=vbvFrames});
                         } finally {if(pattern!=null){if(!pattern.HasExited){pattern.CloseMainWindow();if(!pattern.WaitForExit(2000))pattern.Kill();}pattern.Dispose();}}
                     }
                     return 0;

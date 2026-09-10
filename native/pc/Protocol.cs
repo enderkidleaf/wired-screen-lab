@@ -54,6 +54,12 @@ namespace WiredScreen {
     }
     public static class ProtocolTests {
         public static void Run(){
+            int[] vbvCounts={1,2,4};long[] vbvBits={333334,666667,1333334};
+            for(int v=0;v<vbvCounts.Length;v++){
+                string args=Engine.Arguments(new Options{VbvFrames=vbvCounts[v]},"h264_nvenc");
+                if(!args.Contains(" -bufsize "+vbvBits[v]+" "))throw new Exception("VBV must equal bitrate * frames / framerate");
+            }
+            if(!Engine.Arguments(new Options{Source="desktop",Adapter=1},"h264_qsv").Contains("-init_hw_device d3d11va=cap:1"))throw new Exception("Capture adapter selection lost");
             byte[] source={0,0,0,1,9,0xf0,0,0,1,0x67,0x42,0,0,1,0x65,1,2,3,0,0,0,1,9,0xf0,0,0,1,0x41,4,5};
             byte[][] reference=null;
             for(int chunk=1;chunk<=source.Length;chunk++){

@@ -81,8 +81,9 @@ namespace WiredScreen {
             string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size=1920x1080:rate=60":"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60";
             string filter=options.Source=="test"?"format=yuv420p":"hwdownload,format=bgra,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p";
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
-            string vbv=options.VbvFrames>0?" -bufsize "+(options.Bitrate*1000/options.VbvFrames)+"k":" -bufsize "+options.Bitrate+"M";
-            return "-hide_banner -loglevel warning -nostdin "+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
+            string vbv=options.VbvFrames>0?" -bufsize "+((options.Bitrate*1000000L*options.VbvFrames+59)/60):" -bufsize "+options.Bitrate+"M";
+            string device=options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
+            return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
         }
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
@@ -105,7 +106,7 @@ namespace WiredScreen {
             string logs=Path.Combine(root,"logs");Directory.CreateDirectory(logs);
             string reportPath=Path.Combine(logs,"usb-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".jsonl");
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
-            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",transport="adb-usb-localabstract",source=options.Source,encoder=codec,width=1920,height=1080,targetFps=60}));
+            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=2,transport="adb-usb-localabstract",source=options.Source,encoder=codec,width=1920,height=1080,targetFps=60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=Arguments(options,codec)}));
             Log("USB 视频通道已连接。编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
             frames=new EncodedFrameQueue();
             ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,"ffmpeg.exe"),Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
