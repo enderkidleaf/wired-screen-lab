@@ -14,27 +14,32 @@ namespace WiredScreen {
         public int Screen=0,Bitrate=20,Seconds=0;
         public int Adapter=-1;
     }
-    // A latency-first mailbox.  Video is live data: once a newer frame exists,
-    // sending an older one can only make the picture feel further behind.
-    public sealed class LatestFrameMailbox {
+    // Encoded P frames may reference earlier frames. Never silently discard
+    // one: fail the session on overload so the next session starts at an IDR.
+    public sealed class EncodedFrameQueue {
         private readonly object gate=new object();
-        private byte[] latest;
+        private readonly Queue<byte[]> pending=new Queue<byte[]>();
+        private readonly int capacity;
         private bool completed;
-        private long dropped;
-        public long Dropped { get { return Interlocked.Read(ref dropped); } }
+        private Exception failure;
+        public EncodedFrameQueue(int capacity=4){if(capacity<1)throw new ArgumentOutOfRangeException("capacity");this.capacity=capacity;}
         public void Publish(byte[] frame) {
             lock(gate) {
                 if(completed)return;
-                if(latest!=null)Interlocked.Increment(ref dropped);
-                latest=frame;
+                if(pending.Count>=capacity){
+                    failure=new IOException("编码帧队列过载，已停止会话以避免损坏参考帧。请重新开始。");
+                    pending.Clear();completed=true;Monitor.PulseAll(gate);throw failure;
+                }
+                pending.Enqueue(frame);
                 Monitor.Pulse(gate);
             }
         }
         public bool Take(out byte[] frame) {
             lock(gate) {
-                while(latest==null&&!completed)Monitor.Wait(gate);
-                if(latest==null){frame=null;return false;}
-                frame=latest;latest=null;return true;
+                while(pending.Count==0&&!completed)Monitor.Wait(gate);
+                if(failure!=null)throw failure;
+                if(pending.Count==0){frame=null;return false;}
+                frame=pending.Dequeue();return true;
             }
         }
         public void Complete() { lock(gate){completed=true;Monitor.PulseAll(gate);} }
@@ -51,7 +56,7 @@ namespace WiredScreen {
         private long sent=0;
         private double rtt=0;
         private StreamWriter report;
-        private LatestFrameMailbox frames;
+        private EncodedFrameQueue frames;
         public static string Command(string file,string args,int timeout){
             ProcessStartInfo info=new ProcessStartInfo(file,args){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
             using(Process p=Process.Start(info)){
@@ -100,7 +105,7 @@ namespace WiredScreen {
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
             report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",transport="adb-usb-localabstract",source=options.Source,encoder=codec,width=1920,height=1080,targetFps=60}));
             Log("USB 视频通道已连接。编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
-            frames=new LatestFrameMailbox();
+            frames=new EncodedFrameQueue();
             ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,"ffmpeg.exe"),Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
             encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
             Task reader=Task.Run(()=>{
@@ -115,6 +120,16 @@ namespace WiredScreen {
                 try{while(!stopped){
                     Packet packet=Wire.Read(network);
                     if(packet.Kind==3)rtt=(Stopwatch.GetTimestamp()-packet.Stamp)*1000.0/Stopwatch.Frequency;
+                    else if(packet.Kind==5){
+                        if(packet.Data.Length!=16)throw new InvalidDataException("Invalid render acknowledgement");
+                        double confirmed=(Stopwatch.GetTimestamp()-packet.Stamp)*1000.0/Stopwatch.Frequency;
+                        double receiver=BitConverter.ToInt64(packet.Data,0)/1e6;
+                        double callbackLag=BitConverter.ToInt64(packet.Data,8)/1e6;
+                        // The reported render timestamp may use an incompatible
+                        // device clock. The sum cancels it and measures only
+                        // receiver-local arrival to callback handling.
+                        lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="frame",schemaVersion=2,sequence=packet.Sequence,sendToRenderAckMs=confirmed,receiveToCallbackMs=receiver+callbackLag,renderTimestampValid=receiver>=0&&callbackLag>=0,receiveToRenderMs=receiver,renderCallbackLagMs=callbackLag}));}
+                    }
                     else if(packet.Kind==4){
                         string json=Encoding.UTF8.GetString(packet.Data);Dictionary<string,object> stats=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);
                         stats["pcTimeUtc"]=DateTime.UtcNow.ToString("o");stats["usbRoundTripMs"]=rtt;stats["sentFrames"]=Interlocked.Read(ref sent);
@@ -137,7 +152,7 @@ namespace WiredScreen {
             }finally{
                 Stop();try{Task.WaitAll(new[]{reader,telemetry},5000);}catch{}
                 lock(gate){if(report!=null){report.Dispose();report=null;}}
-                Log("传输已停止，已发送 "+sent+" 帧；为保持低延迟丢弃过期帧 "+frames.Dropped+" 帧。");
+                Log("传输已停止，已发送 "+sent+" 帧；编码参考帧按顺序发送，过载时终止会话。");
                 frames=null;
             }
         }

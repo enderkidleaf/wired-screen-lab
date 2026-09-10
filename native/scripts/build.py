@@ -1,4 +1,4 @@
-import pathlib, subprocess, zipfile, shutil, os
+import pathlib, subprocess, zipfile, shutil, os, filecmp
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 NATIVE=ROOT/'native';TOOLS=ROOT/'.tools';BUILD=NATIVE/'build';DIST=NATIVE/'dist'
 def find(root,name):
@@ -32,7 +32,9 @@ def main():
     run([jdk/'java.exe','-jar',bt/'lib'/'apksigner.jar','verify',apk])
     csc=pathlib.Path(os.environ.get('WINDIR','C:/Windows'))/'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     run([csc,'/nologo','/target:exe','/platform:x64','/optimize+','/out:'+str(DIST/'WiredScreen.exe'),'/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll',*sorted((NATIVE/'pc').glob('*.cs'))])
-    for name in ['adb.exe','AdbWinApi.dll','AdbWinUsbApi.dll']:shutil.copy2(find(TOOLS/'android-platform-tools',name),DIST/name)
+    for name in ['adb.exe','AdbWinApi.dll','AdbWinUsbApi.dll']:
+        source=find(TOOLS/'android-platform-tools',name)
+        if not (DIST/name).exists() or not filecmp.cmp(source,DIST/name,shallow=False):shutil.copy2(source,DIST/name)
     shutil.copy2(find(TOOLS/'ffmpeg','ffmpeg.exe'),DIST/'ffmpeg.exe')
     print('Built '+str(apk)+' and WiredScreen.exe')
 if __name__=='__main__':main()

@@ -26,7 +26,7 @@ namespace WiredScreen {
             output.Write(h,0,h.Length);output.Write(data,0,data.Length);
         }
         public static void Hello(Stream output) {
-            byte[] h=new byte[32];Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("WSCREEN1"),0,h,0,8);
+            byte[] h=new byte[32];Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("WSCREEN2"),0,h,0,8);
             Buffer.BlockCopy(BitConverter.GetBytes(1920),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(1080),0,h,12,4);Buffer.BlockCopy(BitConverter.GetBytes(60),0,h,16,4);Buffer.BlockCopy(BitConverter.GetBytes(1),0,h,20,4);output.Write(h,0,h.Length);
         }
     }
@@ -67,11 +67,17 @@ namespace WiredScreen {
             if(packet.Sequence!=42||packet.Stamp!=12345||packet.Data.Length!=source.Length)throw new Exception("Packet round trip");
             byte[] bad=new byte[20];Buffer.BlockCopy(BitConverter.GetBytes(-1),0,bad,4,4);
             try{Wire.Read(new MemoryStream(bad));throw new Exception("Negative size accepted");}catch(InvalidDataException){}
-            LatestFrameMailbox mailbox=new LatestFrameMailbox();
+            EncodedFrameQueue mailbox=new EncodedFrameQueue(2);
             mailbox.Publish(new byte[]{1});mailbox.Publish(new byte[]{2});byte[] latest;
-            if(!mailbox.Take(out latest)||latest[0]!=2||mailbox.Dropped!=1)throw new Exception("Latest-frame mailbox retained stale video");
+            if(!mailbox.Take(out latest)||latest[0]!=1)throw new Exception("Encoded reference frame lost");
+            if(!mailbox.Take(out latest)||latest[0]!=2)throw new Exception("Encoded frame order changed");
             mailbox.Complete();if(mailbox.Take(out latest))throw new Exception("Completed mailbox yielded a frame");
-            Console.WriteLine("PASS: Annex-B chunk boundaries, packet round trip, malformed size, latest-frame delivery");
+            EncodedFrameQueue overloaded=new EncodedFrameQueue(1);overloaded.Publish(new byte[]{1});
+            bool overflow=false;try{overloaded.Publish(new byte[]{2});}catch(IOException){overflow=true;}
+            if(!overflow)throw new Exception("Queue overload was silently ignored");
+            bool consumerFailed=false;try{overloaded.Take(out latest);}catch(IOException){consumerFailed=true;}
+            if(!consumerFailed)throw new Exception("Consumer continued with broken references");
+            Console.WriteLine("PASS: Annex-B boundaries, packet round trip, malformed size, ordered encoded frames, overload fail-closed");
         }
     }
 }

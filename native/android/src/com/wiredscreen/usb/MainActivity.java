@@ -11,6 +11,7 @@ import android.net.LocalSocket;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
@@ -26,6 +27,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
 import org.json.JSONObject;
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
@@ -91,7 +93,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static void packet(OutputStream out,int type,int sequence,long stamp,byte[] bytes)throws IOException{
         ByteBuffer h=ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
         h.putInt(type).putInt(bytes.length).putInt(sequence).putLong(stamp);
-        out.write(h.array());out.write(bytes);out.flush();
+        synchronized(out){out.write(h.array());out.write(bytes);out.flush();}
     }
     private void fitVideo(int w,int h){
         ui.post(()->{
@@ -106,7 +108,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         out.write("WREADY01".getBytes(StandardCharsets.US_ASCII));out.flush();
         ByteBuffer hello=ByteBuffer.wrap(exact(in,32)).order(ByteOrder.LITTLE_ENDIAN);
         byte[] magic=new byte[8];hello.get(magic);
-        if(!new String(magic,StandardCharsets.US_ASCII).equals("WSCREEN1"))throw new IOException("协议不匹配");
+        if(!new String(magic,StandardCharsets.US_ASCII).equals("WSCREEN2"))throw new IOException("协议不匹配，请同时更新电脑和手机 App");
         int width=hello.getInt(),height=hello.getInt(),fps=hello.getInt(),format=hello.getInt();
         if(width!=1920||height!=1080||fps!=60||format!=1)throw new IOException("不支持的画面参数");
         final MediaCodec decoder=MediaCodec.createDecoderByType("video/avc");
@@ -123,7 +125,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         AtomicLong decoded=new AtomicLong(),rendered=new AtomicLong();
         AtomicBoolean draining=new AtomicBoolean(true);
         decoder.configure(config,video.getHolder().getSurface(),null,0);
-        decoder.setOnFrameRenderedListener((c,pts,ns)->rendered.incrementAndGet(),ui);
+        final ConcurrentHashMap<Long,long[]> frameTimes=new ConcurrentHashMap<>();
+        final HandlerThread renderEvents=new HandlerThread("render-events");renderEvents.start();
+        decoder.setOnFrameRenderedListener((c,pts,ns)->{
+            rendered.incrementAndGet();
+            long[] timing=frameTimes.remove(pts);
+            if(timing!=null){
+                long now=System.nanoTime();
+                {
+                    byte[] metrics=ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putLong(ns-timing[2]).putLong(now-ns).array();
+                    try{packet(out,5,(int)timing[0],timing[1],metrics);}catch(IOException e){try{socket.close();}catch(IOException ignored){}}
+                }
+            }
+        },new Handler(renderEvents.getLooper()));
         decoder.start();fitVideo(width,height);
         Thread drain=new Thread(()->{
             MediaCodec.BufferInfo info=new MediaCodec.BufferInfo();
@@ -141,6 +155,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if(size<0||size>MAX_PACKET)throw new IOException("数据包大小异常");
                 byte[] data=exact(in,size);
                 if(type==1){
+                    long receivedAt=System.nanoTime();
+                    long pts=(long)sequence*1000000/60;
+                    // Older Android versions may omit callbacks. Bound diagnostic
+                    // state independently of the decoder; never drop video here.
+                    if(frameTimes.size()>=256)frameTimes.clear();
+                    frameTimes.put(pts,new long[]{sequence,stamp,receivedAt});
                     int index=decoder.dequeueInputBuffer(1000000);
                     if(index<0)throw new IOException("解码器阻塞，请降低负载后重试");
                     ByteBuffer buffer=decoder.getInputBuffer(index);if(buffer==null||buffer.capacity()<size)throw new IOException("解码缓冲不足");
@@ -157,6 +177,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }
             }
-        }finally{draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();}}
+        }finally{draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();renderEvents.quitSafely();frameTimes.clear();}}
     }
 }

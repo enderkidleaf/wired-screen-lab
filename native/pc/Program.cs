@@ -40,6 +40,11 @@ namespace WiredScreen {
     public static class Program {
         [STAThread] public static int Main(string[] args){
             try{
+                if(Array.IndexOf(args,"--pattern")>=0){
+                    int at=Array.IndexOf(args,"--display");
+                    if(at<0||at+1>=args.Length)throw new ArgumentException("--display is required");
+                    Application.EnableVisualStyles();Application.Run(new LatencyPattern(args[at+1]));return 0;
+                }
                 if(Array.IndexOf(args,"--self-test")>=0){ProtocolTests.Run();return 0;}
                 if(Array.IndexOf(args,"--install")>=0){using(Engine engine=new Engine())engine.Install();return 0;}
                 if(Array.IndexOf(args,"--virtual")>=0){
@@ -54,7 +59,11 @@ namespace WiredScreen {
                         int hr=DisplayTopology.WiredScreenFindOutput(target.DeviceName,out adapter,out output);
                         if(hr<0)throw new Exception("虚拟屏没有可用的 DXGI 捕获输出：0x"+hr.ToString("X8"));
                         Console.WriteLine("虚拟屏 "+target.DeviceName+" adapter="+adapter+" output="+output);
-                        using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds});
+                        System.Diagnostics.Process pattern=null;
+                        try {
+                            if(Array.IndexOf(args,"--dynamic")>=0)pattern=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,"--pattern --display "+target.DeviceName){UseShellExecute=false});
+                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds});
+                        } finally {if(pattern!=null){if(!pattern.HasExited){pattern.CloseMainWindow();if(!pattern.WaitForExit(2000))pattern.Kill();}pattern.Dispose();}}
                     }
                     return 0;
                 }
