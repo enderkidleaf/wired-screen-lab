@@ -13,6 +13,7 @@ namespace WiredScreen {
         public string Source="test",Encoder="auto";
         public int Screen=0,Bitrate=20,Seconds=0,VbvFrames=0;
         public int Adapter=-1;
+        public bool PreferGpu=false,GpuFrames=false;
     }
     // Encoded P frames may reference earlier frames. Never silently discard
     // one: fail the session on overload so the next session starts at an IDR.
@@ -69,7 +70,21 @@ namespace WiredScreen {
         }
         private string Adb(string args){return Command(Path.Combine(root,"adb.exe"),"-d "+args,15000);}
         public void Install(){Log("正在安装 APK；请留意手机安装确认。");Adb("install -r \""+Path.Combine(root,"WiredScreen.apk")+"\"");Log("APK 安装完成。");}
-        private string ChooseEncoder(string requested){
+        private string ChooseEncoder(Options options){
+            string requested=options.Encoder;
+            options.GpuFrames=false;
+            if(options.PreferGpu&&options.Source=="desktop"&&(requested=="auto"||requested=="h264_qsv")){
+                options.GpuFrames=true;
+                try {
+                    string probe=Arguments(options,"h264_qsv").Replace("-f avi pipe:1","-frames:v 3 -f null -");
+                    Command(Path.Combine(root,"ffmpeg.exe"),probe,15000);
+                    Log("已验证 GPU 纹理映射 → QSV 色彩转换与编码，无显式 CPU 像素下载。");
+                    return "h264_qsv";
+                } catch(Exception ex){
+                    options.GpuFrames=false;
+                    Log("GPU 纹理路径不可用，使用兼容捕获："+ex.Message);
+                }
+            }
             if(requested!="auto")return requested;
             foreach(string name in new[]{"h264_nvenc","h264_qsv","h264_amf"}){
                 try{Command(Path.Combine(root,"ffmpeg.exe"),"-hide_banner -loglevel error -f lavfi -i color=size=1920x1080:rate=60 -frames:v 1 -c:v "+name+" -f null -",20000);Log("可用硬件编码器："+name);return name;}catch{ }
@@ -80,6 +95,10 @@ namespace WiredScreen {
             if(options.VbvFrames<0||options.VbvFrames>4)throw new ArgumentOutOfRangeException("VbvFrames");
             string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size=1920x1080:rate=60":"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60";
             string filter=options.Source=="test"?"format=yuv420p":"hwdownload,format=bgra,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p";
+            if(options.GpuFrames){
+                if(options.Source!="desktop"||codec!="h264_qsv")throw new ArgumentException("GPU texture path requires desktop capture and QSV");
+                filter="hwmap=derive_device=qsv,vpp_qsv=w=1920:h=1080:format=nv12";
+            }
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
             string vbv=options.VbvFrames>0?" -bufsize "+((options.Bitrate*1000000L*options.VbvFrames+59)/60):" -bufsize "+options.Bitrate+"M";
             string device=options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
@@ -88,7 +107,7 @@ namespace WiredScreen {
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
-            string codec=ChooseEncoder(options.Encoder);if(stopped)return;
+            string codec=ChooseEncoder(options);if(stopped)return;
             string session=Guid.NewGuid().ToString("N");
             Adb("shell am start -n com.wiredscreen.usb/.MainActivity --es session "+session);
             port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_"+session));
@@ -106,7 +125,7 @@ namespace WiredScreen {
             string logs=Path.Combine(root,"logs");Directory.CreateDirectory(logs);
             string reportPath=Path.Combine(logs,"usb-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".jsonl");
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
-            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=2,transport="adb-usb-localabstract",source=options.Source,encoder=codec,width=1920,height=1080,targetFps=60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=Arguments(options,codec)}));
+            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=2,transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=1920,height=1080,targetFps=60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=Arguments(options,codec)}));
             Log("USB 视频通道已连接。编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
             frames=new EncodedFrameQueue();
             ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,"ffmpeg.exe"),Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};

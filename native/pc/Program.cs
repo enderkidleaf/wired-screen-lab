@@ -29,7 +29,7 @@ namespace WiredScreen {
             start.Click+=async(s,e)=>{
                 start.Enabled=false;install.Enabled=false;stop.Enabled=true;
                 Options o=new Options{Source=source.SelectedIndex==0?"test":"desktop",Encoder=codec.Text,Screen=(int)screen.Value};
-                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
+                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;o.PreferGpu=true;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
             };
             stop.Click+=(s,e)=>{if(engine!=null)engine.Stop();};
             FormClosing+=(s,e)=>{if(engine!=null)engine.Stop();if(virtualDisplay!=null)virtualDisplay.Dispose();};
@@ -63,7 +63,7 @@ namespace WiredScreen {
                         System.Diagnostics.Process pattern=null;
                         try {
                             if(Array.IndexOf(args,"--dynamic")>=0)pattern=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,"--pattern --display "+target.DeviceName){UseShellExecute=false});
-                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds,VbvFrames=vbvFrames});
+                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds,VbvFrames=vbvFrames,PreferGpu=Array.IndexOf(args,"--compat")<0});
                         } finally {if(pattern!=null){if(!pattern.HasExited){pattern.CloseMainWindow();if(!pattern.WaitForExit(2000))pattern.Kill();}pattern.Dispose();}}
                     }
                     return 0;

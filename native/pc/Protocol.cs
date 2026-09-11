@@ -59,6 +59,12 @@ namespace WiredScreen {
             public override int ReadByte(){if(Position>=Length)throw new Exception("Read beyond current frame");return base.ReadByte();}
         }
         public static void Run(){
+            string gpu=Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"h264_qsv");
+            if(!gpu.Contains("hwmap=derive_device=qsv,vpp_qsv=")||gpu.Contains("hwdownload"))throw new Exception("GPU capture path downloads pixels");
+            if(!Engine.Arguments(new Options{Source="desktop"},"h264_nvenc").Contains("hwdownload"))throw new Exception("Compatibility capture path lost");
+            bool invalidGpu=false;
+            try{Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"h264_nvenc");}catch(ArgumentException){invalidGpu=true;}
+            if(!invalidGpu)throw new Exception("Unsupported GPU encoder combination accepted");
             byte[] avi={82,73,70,70,255,255,255,255,65,86,73,32,76,73,83,84,255,255,255,255,109,111,118,105,48,48,100,99,4,0,0,0,0,0,1,101};
             using(Stream single=new NoReadPastEndStream(avi)){
                 EncodedPacketReader packets=new EncodedPacketReader(single);byte[] picture;
