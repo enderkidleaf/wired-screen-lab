@@ -4,6 +4,10 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+#include <io.h>
+#include <fcntl.h>
+#include <timeapi.h>
+#pragma comment(lib,"winmm.lib")
 using namespace WiredScreenGpu;
 static void Check(HRESULT hr,const char* what) {
     if(hr!=S_OK){char text[200];sprintf_s(text,"%s: 0x%08lx",what,static_cast<unsigned long>(hr));throw std::runtime_error(text);}
@@ -106,7 +110,12 @@ static void CheckColorSyntax(){
     }
     puts("PASS: absent/existing VUI, unchanged non-SPS NALs, malformed input and unsupported profile rejection.");
 }
-static void EncodeThree(const wchar_t* outputPath,bool fromDriver){
+static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeconds=-1){
+    const bool streaming=streamSeconds>=0;
+    struct TimerPeriod {
+        TimerPeriod(){if(timeBeginPeriod(1)!=TIMERR_NOERROR)throw std::runtime_error("High-resolution timer unavailable");}
+        ~TimerPeriod(){timeEndPeriod(1);}
+    } timerPeriod;
     MediaRuntime runtime;
     HandoffClient client;ComPtr<ID3D11Device> device;Consumer consumer;
     if(fromDriver){Check(client.Connect(HandoffPipe,0,[](DWORD pid){try{VerifyDriver(pid);return true;}catch(...){return false;}}),"driver connection");
@@ -120,24 +129,37 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver){
     if(fromDriver)Check(client.InitConsumer(device.Get(),consumer),"driver consumer");
     int nameSize=WideCharToMultiByte(CP_UTF8,0,encoder.name.c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> name(nameSize);
     WideCharToMultiByte(CP_UTF8,0,encoder.name.c_str(),-1,name.data(),nameSize,nullptr,nullptr);
-    printf("Hardware encoder: %s; lowLatencyAccepted=%d bFramesDisabled=%d colorMetadataAccepted=%d\n",name.data(),encoder.lowLatencyAccepted,encoder.bFramesDisabled,encoder.colorMetadataAccepted);
+    fprintf(streaming?stderr:stdout,"Hardware encoder: %s; lowLatencyAccepted=%d bFramesDisabled=%d colorMetadataAccepted=%d\n",name.data(),encoder.lowLatencyAccepted,encoder.bFramesDisabled,encoder.colorMetadataAccepted);
     ComPtr<ID3D11Texture2D> synthetic;
     if(!fromDriver){D3D11_TEXTURE2D_DESC d{};d.Width=1920;d.Height=1080;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_B8G8R8A8_UNORM;d.BindFlags=D3D11_BIND_RENDER_TARGET;
         std::vector<uint32_t> pixels(d.Width*d.Height,0xffcc4422);D3D11_SUBRESOURCE_DATA initial{pixels.data(),d.Width*4,0};Check(device->CreateTexture2D(&d,&initial,&synthetic),"synthetic GPU source");}
-    FILE* file=nullptr;if(_wfopen_s(&file,outputPath,L"wb")!=0)throw std::runtime_error("output file");
-    unsigned submitted=0,received=0;uint64_t last=0;ULONGLONG deadline=GetTickCount64()+15000;
+    FILE* file=nullptr;
+    if(streaming){if(_setmode(_fileno(stdout),_O_BINARY)==-1)throw std::runtime_error("binary stdout");file=stdout;
+        LARGE_INTEGER frequency;QueryPerformanceFrequency(&frequency);
+        if(fwrite("WSNGPU01",1,8,file)!=8||fwrite(&frequency.QuadPart,8,1,file)!=1||fflush(file)!=0)throw std::runtime_error("stream header");}
+    else if(_wfopen_s(&file,outputPath,L"wb")!=0)throw std::runtime_error("output file");
+    unsigned submitted=0,received=0;uint64_t last=0;ULONGLONG now=GetTickCount64();
+    ULONGLONG finish=streaming?(streamSeconds?now+static_cast<ULONGLONG>(streamSeconds)*1000:MAXULONGLONG):now+15000;
+    ULONGLONG deadline=streaming?(streamSeconds?finish+5000:MAXULONGLONG):finish;
     try{
         while(!encoder.Drained() && GetTickCount64()<deadline){
+            if(streaming&&GetTickCount64()>=finish)encoder.Drain();
             NativeVideoPacket packet;
             if(encoder.Poll(packet)){
                 // Native MF H.264 samples are expected to be Annex B. Do not
                 // silently treat length-prefixed bytes as a bytestream.
                 const auto& bytes=packet.bytes;
                 if(bytes.size()<4 || bytes[0]!=0 || bytes[1]!=0 || (bytes[2]!=1 && !(bytes[2]==0&&bytes[3]==1)))throw std::runtime_error("Encoder output is not Annex B");
-                if(fwrite(bytes.data(),1,bytes.size(),file)!=bytes.size())throw std::runtime_error("write encoded packet");
-                printf("encoded source=%llu bytes=%zu capturedQpc=%lld encodedQpc=%lld\n",static_cast<unsigned long long>(packet.frame.sequence),bytes.size(),static_cast<long long>(packet.frame.capturedQpc),static_cast<long long>(packet.encodedQpc));++received;
+                if(streaming){
+                    struct Header{uint32_t bytes,reserved;uint64_t sequence;int64_t captured,encoded;};static_assert(sizeof(Header)==32,"native packet layout");
+                    if(bytes.size()>4*1024*1024)throw std::runtime_error("Oversized native packet");
+                    Header header{static_cast<uint32_t>(bytes.size()),0,packet.frame.sequence,packet.frame.capturedQpc,packet.encodedQpc};
+                    if(fwrite(&header,sizeof(header),1,file)!=1)throw std::runtime_error("write packet header");
+                }
+                if(fwrite(bytes.data(),1,bytes.size(),file)!=bytes.size()||(streaming&&fflush(file)!=0))throw std::runtime_error("write encoded packet");
+                if(!streaming)printf("encoded source=%llu bytes=%zu capturedQpc=%lld encodedQpc=%lld\n",static_cast<unsigned long long>(packet.frame.sequence),bytes.size(),static_cast<long long>(packet.frame.capturedQpc),static_cast<long long>(packet.encodedQpc));++received;
             }
-            if(submitted<3 && encoder.CanSubmit()){
+            if((streaming||submitted<3) && encoder.CanSubmit()){
                 ID3D11Texture2D* source=synthetic.Get();FrameInfo frame{};
                 if(fromDriver){HRESULT hr=consumer.TakeLatest(&source,&frame);if(hr==S_FALSE){Sleep(1);continue;}Check(hr,"take driver texture");}
                 else{LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);frame={submitted+1,qpc.QuadPart};}
@@ -147,18 +169,20 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver){
                 // ReleaseSync orders the queued GPU conversion's source read;
                 // encoder owns a separate NV12 surface and never holds the slot.
                 if(fromDriver)Check(consumer.Release(),"release driver source");
-                encoder.Submit(nv12.Get(),frame);++submitted;if(submitted==3)encoder.Drain();
+                encoder.Submit(nv12.Get(),frame);++submitted;if(!streaming&&submitted==3)encoder.Drain();
             }
             Sleep(1);
         }
-        if(!encoder.Drained()||received!=3)throw std::runtime_error("Expected three native encoded packets before deadline");
+        if(!encoder.Drained()||(!streaming&&received!=3)||received!=submitted)throw std::runtime_error("Native encoder did not deliver all submitted packets before deadline");
         if(fclose(file)!=0){file=nullptr;throw std::runtime_error("close output");}file=nullptr;
-        puts("PASS: three source textures converted on GPU and encoded as native H264 packets; external decode verification still required.");
+        if(!streaming)puts("PASS: three source textures converted on GPU and encoded as native H264 packets; external decode verification still required.");
     }catch(...){if(file)fclose(file);throw;}
 }
 int wmain(int argc,wchar_t** argv) {
     try {
         if(argc==1){SelfTest();return 0;}
+        if(argc==2 && wcscmp(argv[1],L"--stream-test")==0){EncodeThree(nullptr,false,1);return 0;}
+        if(argc==3 && wcscmp(argv[1],L"--stream-driver")==0){wchar_t* end=nullptr;long seconds=wcstol(argv[2],&end,10);if(!end||*end||seconds<0||seconds>3600)throw std::runtime_error("Invalid stream duration");DebugPrivilege privilege;EncodeThree(nullptr,true,static_cast<int>(seconds));return 0;}
         if(argc==2 && wcscmp(argv[1],L"--color-test")==0){CheckColorSyntax();return 0;}
         if(argc==3 && wcscmp(argv[1],L"--encode-test")==0){EncodeThree(argv[2],false);return 0;}
         if(argc==3 && wcscmp(argv[1],L"--encode-driver")==0){DebugPrivilege privilege;EncodeThree(argv[2],true);return 0;}

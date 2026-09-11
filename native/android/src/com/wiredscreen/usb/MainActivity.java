@@ -116,6 +116,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         MediaFormat config=MediaFormat.createVideoFormat("video/avc",width,height);
         config.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,MAX_PACKET);
         config.setInteger(MediaFormat.KEY_PRIORITY,0);
+        config.setInteger(MediaFormat.KEY_FRAME_RATE,fps);
+        config.setFloat(MediaFormat.KEY_OPERATING_RATE,(float)fps);
         boolean lowLatency=false;
         if(Build.VERSION.SDK_INT>=30){
             MediaCodecInfo.CodecCapabilities caps=decoder.getCodecInfo().getCapabilitiesForType("video/avc");
@@ -148,6 +150,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }}catch(Exception e){if(draining.get())Log.e("WiredScreen","Decoder drain",e);draining.set(false);try{socket.close();}catch(Exception ignored){}}
         },"video-output");drain.start();
         long last=System.nanoTime(),lastDecoded=0,lastRendered=0,received=0,lastBytes=0;
+        long inputWaitNs=0,inputWaitMaxNs=0,inputSamples=0;
         try{
             while(run==epoch&&resumed&&draining.get()){
                 ByteBuffer header=ByteBuffer.wrap(exact(in,20)).order(ByteOrder.LITTLE_ENDIAN);
@@ -161,7 +164,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     // state independently of the decoder; never drop video here.
                     if(frameTimes.size()>=256)frameTimes.clear();
                     frameTimes.put(pts,new long[]{sequence,stamp,receivedAt});
+                    long inputStarted=System.nanoTime();
                     int index=decoder.dequeueInputBuffer(1000000);
+                    long inputWait=System.nanoTime()-inputStarted;
+                    inputWaitNs+=inputWait;inputWaitMaxNs=Math.max(inputWaitMaxNs,inputWait);inputSamples++;
                     if(index<0)throw new IOException("解码器阻塞，请降低负载后重试");
                     ByteBuffer buffer=decoder.getInputBuffer(index);if(buffer==null||buffer.capacity()<size)throw new IOException("解码缓冲不足");
                     buffer.clear();buffer.put(data);decoder.queueInputBuffer(index,0,size,(long)sequence*1000000/60,0);received+=size;
@@ -172,7 +178,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     long d=decoded.get(),r=rendered.get();
                     double decodeFps=(d-lastDecoded)/seconds,renderFps=(r-lastRendered)/seconds;
                     JSONObject stats=new JSONObject();stats.put("width",width);stats.put("height",height);stats.put("decodedFps",decodeFps);stats.put("renderedFps",renderFps);stats.put("decoded",d);stats.put("rendered",r);stats.put("mbps",(received-lastBytes)*8/seconds/1e6);stats.put("decoder",decoderName);stats.put("lowLatency",low);stats.put("elapsedRealtimeMs",android.os.SystemClock.elapsedRealtime());
+                    stats.put("inputWaitMeanMs",inputSamples==0?0:inputWaitNs/1e6/inputSamples);
+                    stats.put("inputWaitMaxMs",inputWaitMaxNs/1e6);
+                    stats.put("inputSamples",inputSamples);
                     packet(out,4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8));
+                    inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
                     show(String.format(java.util.Locale.US,"USB 直连 · %d × %d · 解码 %.1f / 呈现回调 %.1f fps\n%s · 低延迟模式 %s",width,height,decodeFps,renderFps,decoderName,low?"开启":"未提供"));
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }

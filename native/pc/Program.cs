@@ -17,7 +17,7 @@ namespace WiredScreen {
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute,85));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,75));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,60));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(layout);
             Label title=new Label{Text="USB 直连，不需要网络共享。\n目标 1920×1080 / 60 fps · 可通过已安装的 IDD 驱动注册 Windows 虚拟扩展屏。",Dock=DockStyle.Fill,AutoSize=false,Font=new Font(Font.FontFamily,13)};layout.Controls.Add(title,0,0);
             FlowLayoutPanel choices=new FlowLayoutPanel{Dock=DockStyle.Fill};source.DropDownStyle=ComboBoxStyle.DropDownList;source.Width=170;source.Items.AddRange(new object[]{"动态测试画面","现有桌面画面"});source.SelectedIndex=0;
-            codec.DropDownStyle=ComboBoxStyle.DropDownList;codec.Width=160;codec.Items.AddRange(new object[]{"auto","h264_nvenc","h264_qsv","h264_amf","libx264"});codec.SelectedIndex=0;
+            codec.DropDownStyle=ComboBoxStyle.DropDownList;codec.Width=160;codec.Items.AddRange(new object[]{"auto","native-mf","h264_nvenc","h264_qsv","h264_amf","libx264"});codec.SelectedIndex=0;
             screen.Maximum=8;screen.Width=60;
             choices.Controls.Add(source);choices.Controls.Add(codec);choices.Controls.Add(new Label{Text="屏幕索引",AutoSize=true,Padding=new Padding(0,5,0,0)});choices.Controls.Add(screen);layout.Controls.Add(choices,0,1);
             FlowLayoutPanel buttons=new FlowLayoutPanel{Dock=DockStyle.Fill};install.Text="安装手机 App";virtualStart.Text="注册虚拟副屏";virtualStop.Text="移除虚拟副屏";start.Text="开始 USB 投屏";stop.Text="停止";stop.Enabled=false;virtualStop.Enabled=false;
@@ -28,8 +28,8 @@ namespace WiredScreen {
             virtualStop.Click+=(s,e)=>{if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}virtualStart.Enabled=true;virtualStop.Enabled=false;Write("虚拟显示器已移除。");};
             start.Click+=async(s,e)=>{
                 start.Enabled=false;install.Enabled=false;stop.Enabled=true;
-                Options o=new Options{Source=source.SelectedIndex==0?"test":"desktop",Encoder=codec.Text,Screen=(int)screen.Value};
-                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;o.PreferGpu=true;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
+                Options o=new Options{Source=source.SelectedIndex==0?"test":"desktop",Encoder=codec.Text,Native=codec.Text=="native-mf",Screen=(int)screen.Value};
+                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Native&&(virtualDisplay==null||!virtualDisplay.IsRunning))throw new Exception("原生模式请先注册虚拟副屏；需要管理员权限和实验驱动。");if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;o.PreferGpu=true;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
             };
             stop.Click+=(s,e)=>{if(engine!=null)engine.Stop();};
             FormClosing+=(s,e)=>{if(engine!=null)engine.Stop();if(virtualDisplay!=null)virtualDisplay.Dispose();};
@@ -63,7 +63,7 @@ namespace WiredScreen {
                         System.Diagnostics.Process pattern=null;
                         try {
                             if(Array.IndexOf(args,"--dynamic")>=0)pattern=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,"--pattern --display "+target.DeviceName){UseShellExecute=false});
-                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds,VbvFrames=vbvFrames,PreferGpu=Array.IndexOf(args,"--compat")<0});
+                            using(Engine engine=new Engine())engine.Run(new Options{Source="desktop",Adapter=(int)adapter,Screen=(int)output,Seconds=seconds,VbvFrames=vbvFrames,Native=Array.IndexOf(args,"--native")>=0,PreferGpu=Array.IndexOf(args,"--compat")<0});
                         } finally {if(pattern!=null){if(!pattern.HasExited){pattern.CloseMainWindow();if(!pattern.WaitForExit(2000))pattern.Kill();}pattern.Dispose();}}
                     }
                     return 0;

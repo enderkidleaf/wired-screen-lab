@@ -13,18 +13,19 @@ namespace WiredScreen {
         public string Source="test",Encoder="auto";
         public int Screen=0,Bitrate=20,Seconds=0,VbvFrames=0;
         public int Adapter=-1;
-        public bool PreferGpu=false,GpuFrames=false;
+        public bool PreferGpu=false,GpuFrames=false,Native=false;
     }
     // Encoded P frames may reference earlier frames. Never silently discard
     // one: fail the session on overload so the next session starts at an IDR.
     public sealed class EncodedFrameQueue {
         private readonly object gate=new object();
-        private readonly Queue<byte[]> pending=new Queue<byte[]>();
+        private readonly Queue<EncodedVideoFrame> pending=new Queue<EncodedVideoFrame>();
         private readonly int capacity;
         private bool completed;
         private Exception failure;
         public EncodedFrameQueue(int capacity=4){if(capacity<1)throw new ArgumentOutOfRangeException("capacity");this.capacity=capacity;}
-        public void Publish(byte[] frame) {
+        public void Publish(byte[] frame) { Publish(new EncodedVideoFrame{Data=frame}); }
+        public void Publish(EncodedVideoFrame frame) {
             lock(gate) {
                 if(completed)return;
                 if(pending.Count>=capacity){
@@ -35,7 +36,8 @@ namespace WiredScreen {
                 Monitor.Pulse(gate);
             }
         }
-        public bool Take(out byte[] frame) {
+        public bool Take(out byte[] frame) { EncodedVideoFrame video;bool available=Take(out video);frame=available?video.Data:null;return available; }
+        public bool Take(out EncodedVideoFrame frame) {
             lock(gate) {
                 while(pending.Count==0&&!completed)Monitor.Wait(gate);
                 if(failure!=null)throw failure;
@@ -43,7 +45,7 @@ namespace WiredScreen {
                 frame=pending.Dequeue();return true;
             }
         }
-        public void Complete() { lock(gate){completed=true;Monitor.PulseAll(gate);} }
+        public void Complete(Exception error=null) { lock(gate){if(error!=null){failure=error;pending.Clear();}completed=true;Monitor.PulseAll(gate);} }
     }
     public sealed class Engine : IDisposable {
         private readonly string root=AppDomain.CurrentDomain.BaseDirectory;
@@ -107,7 +109,8 @@ namespace WiredScreen {
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
-            string codec=ChooseEncoder(options);if(stopped)return;
+            if(options.Native&&(options.Source!="desktop"||options.Bitrate!=20||options.VbvFrames!=0))throw new ArgumentException("原生模式目前需要虚拟桌面、20 Mbps 和默认 VBV 参数。");
+            string codec=options.Native?"native-mf":ChooseEncoder(options);if(stopped)return;
             string session=Guid.NewGuid().ToString("N");
             Adb("shell am start -n com.wiredscreen.usb/.MainActivity --es session "+session);
             port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_"+session));
@@ -125,17 +128,21 @@ namespace WiredScreen {
             string logs=Path.Combine(root,"logs");Directory.CreateDirectory(logs);
             string reportPath=Path.Combine(logs,"usb-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".jsonl");
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
-            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=2,transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=1920,height=1080,targetFps=60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=Arguments(options,codec)}));
+            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=2,transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.Native?"idd-d3d11-mf":options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=1920,height=1080,targetFps=60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)}));
             Log("USB 视频通道已连接。编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
             frames=new EncodedFrameQueue();
-            ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,"ffmpeg.exe"),Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+            ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,options.Native?"GpuHandoffProbe.exe":"ffmpeg.exe"),options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardErrorEncoding=Encoding.UTF8};
             encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
             Task reader=Task.Run(()=>{
                 try{
-                    EncodedPacketReader packets=new EncodedPacketReader(encoder.StandardOutput.BaseStream);
-                    byte[] packet;
-                    while(!stopped&&packets.Read(out packet))frames.Publish(packet);
-                }finally{frames.Complete();}
+                    if(options.Native){
+                        NativePacketReader packets=new NativePacketReader(encoder.StandardOutput.BaseStream);EncodedVideoFrame packet;
+                        while(!stopped&&packets.Read(out packet)){if(packet.Frequency!=Stopwatch.Frequency)throw new IOException("Native clock frequency mismatch");frames.Publish(packet);}
+                    } else {
+                        EncodedPacketReader packets=new EncodedPacketReader(encoder.StandardOutput.BaseStream);byte[] packet;
+                        while(!stopped&&packets.Read(out packet))frames.Publish(packet);
+                    }
+                }catch(Exception ex){if(!stopped)frames.Complete(ex);}finally{frames.Complete();}
             });
             Task telemetry=Task.Run(()=>{
                 try{while(!stopped){
@@ -161,14 +168,17 @@ namespace WiredScreen {
             });
             Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;
             try{
-                byte[] frame;
+                EncodedVideoFrame frame;
                 while(frames.Take(out frame)){
                     if(stopped)break;
-                    Wire.Write(network,1,sequence,Stopwatch.GetTimestamp(),frame);Interlocked.Increment(ref sent);
+                    long sendQpc=Stopwatch.GetTimestamp();
+                    Wire.Write(network,1,sequence,sendQpc,frame.Data);Interlocked.Increment(ref sent);
+                    if(options.Native){lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="native-frame",sequence=sequence,sourceSequence=frame.SourceSequence,capturedQpc=frame.CapturedQpc,encodedQpc=frame.EncodedQpc,sendQpc=sendQpc,qpcFrequency=frame.Frequency,captureToEncodedMs=(frame.EncodedQpc-frame.CapturedQpc)*1000.0/frame.Frequency,encodedToSendMs=(sendQpc-frame.EncodedQpc)*1000.0/frame.Frequency}));}}
                     if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
                     if(options.Seconds>0&&elapsed.Elapsed.TotalSeconds>=options.Seconds)break;
                 }
                 if(reader.IsFaulted)throw reader.Exception.GetBaseException();
+                if(!stopped&&encoder.WaitForExit(2000)&&encoder.ExitCode!=0)throw new IOException("编码进程失败："+stderr);
                 if(!stopped&&sequence<2)throw new IOException("编码没有生成画面："+stderr);
             }finally{
                 Stop();try{Task.WaitAll(new[]{reader,telemetry},5000);}catch{}

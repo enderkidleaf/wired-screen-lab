@@ -59,6 +59,21 @@ namespace WiredScreen {
             public override int ReadByte(){if(Position>=Length)throw new Exception("Read beyond current frame");return base.ReadByte();}
         }
         public static void Run(){
+            byte[] native;
+            using(MemoryStream data=new MemoryStream()){
+                BinaryWriter writer=new BinaryWriter(data);writer.Write(System.Text.Encoding.ASCII.GetBytes("WSNGPU01"));writer.Write(10000000L);
+                writer.Write(4);writer.Write(0);writer.Write(72L);writer.Write(100L);writer.Write(120L);writer.Write(new byte[]{0,0,1,0x65});native=data.ToArray();
+            }
+            using(Stream current=new NoReadPastEndStream(native)){
+                EncodedVideoFrame frame;NativePacketReader parser=new NativePacketReader(current);
+                if(!parser.Read(out frame)||frame.SourceSequence!=72||frame.CapturedQpc!=100||frame.EncodedQpc!=120||frame.Data[3]!=0x65)throw new Exception("Native frame boundary or metadata lost");
+            }
+            byte[] broken=(byte[])native.Clone();broken[16]=5;
+            bool incomplete=false;try{EncodedVideoFrame frame;new NativePacketReader(new MemoryStream(broken)).Read(out frame);}catch(EndOfStreamException){incomplete=true;}
+            if(!incomplete)throw new Exception("Truncated native payload accepted");
+            broken=(byte[])native.Clone();broken[40]=99;
+            bool badClock=false;try{EncodedVideoFrame frame;new NativePacketReader(new MemoryStream(broken)).Read(out frame);}catch(InvalidDataException){badClock=true;}
+            if(!badClock)throw new Exception("Native timestamp regression accepted");
             string gpu=Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"h264_qsv");
             if(!gpu.Contains("hwmap=derive_device=qsv,vpp_qsv=")||gpu.Contains("hwdownload"))throw new Exception("GPU capture path downloads pixels");
             if(!Engine.Arguments(new Options{Source="desktop"},"h264_nvenc").Contains("hwdownload"))throw new Exception("Compatibility capture path lost");

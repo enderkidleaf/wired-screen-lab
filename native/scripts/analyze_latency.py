@@ -12,6 +12,7 @@ def analyze(path):
     for row in frames:
         row.setdefault('receiveToCallbackMs',row['receiveToRenderMs']+row['renderCallbackLagMs'])
     stats=[row for row in rows if 'decodedFps' in row]
+    native=[row for row in rows if row.get('type')=='native-frame']
     result={'file':str(path),'frameAcknowledgements':len(frames),'statsSamples':len(stats),
             'scope':'Send-to-ack includes return transit; receive-to-render starts after packet reception. Neither includes source capture/encode. No cross-device clock subtraction.',
             'metrics':{}}
@@ -19,6 +20,20 @@ def analyze(path):
     # warmup approximation until capture timestamps are available.
     warm=[row for row in frames if row['sequence']>=300]
     result['warmup']='sequence >= 300; nominal five seconds, not source timing'
+    if native:
+        start=native[0]['sendQpc']
+        warm_native=[row for row in native if (row['sendQpc']-start)/row['qpcFrequency']>=5]
+        by_sequence={row['sequence']:row for row in warm_native}
+        warm=[row for row in frames if row['sequence'] in by_sequence]
+        result['warmup']='five actual PC-clock seconds since first native send'
+        result['nativeFrames']=len(native)
+        result['nativeMetrics']={}
+        for key in ('captureToEncodedMs','encodedToSendMs'):
+            values=[row[key] for row in warm_native]
+            result['nativeMetrics'][key]={name:percentile(values,p) for name,p in [('p50',.5),('p95',.95),('p99',.99),('max',1)]}
+        values=[by_sequence[row['sequence']]['captureToEncodedMs']+by_sequence[row['sequence']]['encodedToSendMs']+row['sendToRenderAckMs'] for row in warm]
+        result['nativeMetrics']['captureToAckMs']={name:percentile(values,p) for name,p in [('p50',.5),('p95',.95),('p99',.99),('max',1)]}
+        result['scope']='Native capture starts at driver surface acquisition; capture-to-ack includes encode, USB, receiver callback handling and return transit. Not source-to-photon. All PC timestamps share QPC; receiver clocks are not subtracted.'
     result['warmFrameAcknowledgements']=len(warm)
     result['invalidReceiverTimestamps']=sum(row['receiveToRenderMs']<0 or row['renderCallbackLagMs']<0 for row in frames)
     for key in ('sendToRenderAckMs','receiveToCallbackMs','receiveToRenderMs','renderCallbackLagMs'):
