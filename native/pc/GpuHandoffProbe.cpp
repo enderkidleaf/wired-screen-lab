@@ -1,4 +1,5 @@
 #include "GpuHandoffClient.h"
+#include "GpuVideoEncoder.h"
 #include <cstdio>
 #include <string>
 #include <stdexcept>
@@ -91,9 +92,76 @@ public:
     }
     ~DebugPrivilege(){if(changed)AdjustTokenPrivileges(token.get(),FALSE,&previous,0,nullptr,nullptr);}
 };
+static void CheckColorSyntax(){
+    // Baseline 16x16 SPS, POC type 2, no VUI. Also exercise an existing VUI
+    // after the first edit, and ensure unrelated NAL payloads are untouched.
+    std::vector<uint8_t> plain{0,0,0,1,0x67,0x42,0,0x1e,0xda,0x79};
+    auto marked=H264Bt709(plain);
+    if(marked==plain||H264Bt709(marked)!=marked)throw std::runtime_error("SPS VUI edit is not idempotent");
+    std::vector<uint8_t> other{0,0,1,0x68,0xc0,0,0,0,1,0x65,0x88,0x80};
+    if(H264Bt709(other)!=other)throw std::runtime_error("Non-SPS bytes changed");
+    for(const auto& malformed:std::vector<std::vector<uint8_t>>{{0,0,1,0x67,66},{0,0,1,0x67,100,0,0,0x80},{1,2,3}}){
+        bool rejected=false;try{H264Bt709(malformed);}catch(const std::runtime_error&){rejected=true;}
+        if(!rejected)throw std::runtime_error("Malformed/unsupported SPS accepted");
+    }
+    puts("PASS: absent/existing VUI, unchanged non-SPS NALs, malformed input and unsupported profile rejection.");
+}
+static void EncodeThree(const wchar_t* outputPath,bool fromDriver){
+    MediaRuntime runtime;
+    HandoffClient client;ComPtr<ID3D11Device> device;Consumer consumer;
+    if(fromDriver){Check(client.Connect(HandoffPipe,0,[](DWORD pid){try{VerifyDriver(pid);return true;}catch(...){return false;}}),"driver connection");
+        device=Device(&client.Info()->adapter);}
+    else device=Device();
+    ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+    Check(device.As(&dxgi),"DXGI device");Check(dxgi->GetAdapter(&adapter),"adapter");Check(adapter->GetDesc(&desc),"LUID");
+    GpuColorConverter converter;converter.Init(device.Get());GpuVideoEncoder encoder;encoder.Init(device.Get(),desc.AdapterLuid);
+    // Acknowledge only after encoder setup so its startup cannot fill the
+    // shared pool with old desktop frames before we're ready to consume them.
+    if(fromDriver)Check(client.InitConsumer(device.Get(),consumer),"driver consumer");
+    int nameSize=WideCharToMultiByte(CP_UTF8,0,encoder.name.c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> name(nameSize);
+    WideCharToMultiByte(CP_UTF8,0,encoder.name.c_str(),-1,name.data(),nameSize,nullptr,nullptr);
+    printf("Hardware encoder: %s; lowLatencyAccepted=%d bFramesDisabled=%d colorMetadataAccepted=%d\n",name.data(),encoder.lowLatencyAccepted,encoder.bFramesDisabled,encoder.colorMetadataAccepted);
+    ComPtr<ID3D11Texture2D> synthetic;
+    if(!fromDriver){D3D11_TEXTURE2D_DESC d{};d.Width=1920;d.Height=1080;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_B8G8R8A8_UNORM;d.BindFlags=D3D11_BIND_RENDER_TARGET;
+        std::vector<uint32_t> pixels(d.Width*d.Height,0xffcc4422);D3D11_SUBRESOURCE_DATA initial{pixels.data(),d.Width*4,0};Check(device->CreateTexture2D(&d,&initial,&synthetic),"synthetic GPU source");}
+    FILE* file=nullptr;if(_wfopen_s(&file,outputPath,L"wb")!=0)throw std::runtime_error("output file");
+    unsigned submitted=0,received=0;uint64_t last=0;ULONGLONG deadline=GetTickCount64()+15000;
+    try{
+        while(!encoder.Drained() && GetTickCount64()<deadline){
+            NativeVideoPacket packet;
+            if(encoder.Poll(packet)){
+                // Native MF H.264 samples are expected to be Annex B. Do not
+                // silently treat length-prefixed bytes as a bytestream.
+                const auto& bytes=packet.bytes;
+                if(bytes.size()<4 || bytes[0]!=0 || bytes[1]!=0 || (bytes[2]!=1 && !(bytes[2]==0&&bytes[3]==1)))throw std::runtime_error("Encoder output is not Annex B");
+                if(fwrite(bytes.data(),1,bytes.size(),file)!=bytes.size())throw std::runtime_error("write encoded packet");
+                printf("encoded source=%llu bytes=%zu capturedQpc=%lld encodedQpc=%lld\n",static_cast<unsigned long long>(packet.frame.sequence),bytes.size(),static_cast<long long>(packet.frame.capturedQpc),static_cast<long long>(packet.encodedQpc));++received;
+            }
+            if(submitted<3 && encoder.CanSubmit()){
+                ID3D11Texture2D* source=synthetic.Get();FrameInfo frame{};
+                if(fromDriver){HRESULT hr=consumer.TakeLatest(&source,&frame);if(hr==S_FALSE){Sleep(1);continue;}Check(hr,"take driver texture");}
+                else{LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);frame={submitted+1,qpc.QuadPart};}
+                if(frame.sequence<=last)throw std::runtime_error("source sequence order");last=frame.sequence;
+                ComPtr<ID3D11Texture2D> nv12;
+                try{nv12=converter.Convert(source);}catch(...){if(fromDriver)consumer.Release();throw;}
+                // ReleaseSync orders the queued GPU conversion's source read;
+                // encoder owns a separate NV12 surface and never holds the slot.
+                if(fromDriver)Check(consumer.Release(),"release driver source");
+                encoder.Submit(nv12.Get(),frame);++submitted;if(submitted==3)encoder.Drain();
+            }
+            Sleep(1);
+        }
+        if(!encoder.Drained()||received!=3)throw std::runtime_error("Expected three native encoded packets before deadline");
+        if(fclose(file)!=0){file=nullptr;throw std::runtime_error("close output");}file=nullptr;
+        puts("PASS: three source textures converted on GPU and encoded as native H264 packets; external decode verification still required.");
+    }catch(...){if(file)fclose(file);throw;}
+}
 int wmain(int argc,wchar_t** argv) {
     try {
         if(argc==1){SelfTest();return 0;}
+        if(argc==2 && wcscmp(argv[1],L"--color-test")==0){CheckColorSyntax();return 0;}
+        if(argc==3 && wcscmp(argv[1],L"--encode-test")==0){EncodeThree(argv[2],false);return 0;}
+        if(argc==3 && wcscmp(argv[1],L"--encode-driver")==0){DebugPrivilege privilege;EncodeThree(argv[2],true);return 0;}
         if(argc==4 && wcscmp(argv[1],L"--client")==0){Receive(argv[3],wcstoul(argv[2],nullptr,10),true);return 0;}
         if(argc==2 && wcscmp(argv[1],L"--driver")==0){DebugPrivilege privilege;Receive(HandoffPipe,0,false,[](DWORD pid){try{VerifyDriver(pid);return true;}catch(...){return false;}});return 0;}
         if(argc==3 && wcscmp(argv[1],L"--driver-pid")==0){DWORD pid=wcstoul(argv[2],nullptr,10);VerifyDriver(pid);Receive(HandoffPipe,pid,false);return 0;}

@@ -1,0 +1,39 @@
+# 原生 GPU 编码进度
+
+2026-09-11：已实现 Windows 原生 GPU 转换及 H.264 编码组件，并通过真实 IDD 三帧编码、独立解码检查。尚未接入手机 USB 发送会话，未完成持续 60 fps 或端到端延迟验收。
+
+## 当前路径
+
+IDD 系统纹理 → 自有共享 BGRA 纹理池 → 独立进程 → D3D11 视频处理器转换 NV12 → 同显卡 Media Foundation 硬件 H.264 编码器 → 单帧编码包。
+
+此路径不使用桌面复制，也不启动 FFmpeg 编码进程，无显式 CPU 原始像素下载。驱动交接和色彩转换仍有 GPU 内复制/转换，硬件驱动内部行为尚未通过 GPU 分析工具检查，不宣称绝对零拷贝。FFmpeg 只在测试结束后用于独立解码验证。
+
+`GpuVideoEncoder.h` 按适配器 LUID 枚举硬件编码器，要求支持 D3D11 纹理输入。当前测试使用 Intel Quick Sync Video H.264 Encoder MFT，接受了低延迟及禁用 B 帧设置。分辨率固定 1920×1080，配置 60 fps、20 Mbps、Baseline。这些是配置值，不是实测吞吐或码率结论。
+
+编码器按 NeedInput/HaveOutput 异步事件提交及获取完整编码包，最多保留三份在途样本，不等待下一帧 AUD 分隔符。输出通过样本 PTS 映射回源帧号、驱动取帧 QPC 和取出编码包时的 QPC。初始化时的输出格式重协商已处理；编码器就绪后才确认驱动开始供帧，避免初始化期间填满旧画面。
+
+真实 IDD 首轮验证的源帧号为 72、93、94，三帧均可解码。该轮先确认供帧再初始化编码器，暴露了启动时旧帧积压的问题，随后已调整就绪顺序并重新编译。调整后的真实 IDD 复核因 Windows 提权提示被取消而未执行；这部分仍待验证，不能以首轮结果声称启动延迟已改善。
+
+## 色彩正确性
+
+GPU 转换使用 BT.709 有限范围。当前 Intel 编码器虽能编码，但不接受完整色彩元数据设置，直接输出的 SPS 缺少 BT.709 标记，默认解码会偏色。
+
+`H264Color.h` 在 CPU 上编辑压缩码流的 Baseline SPS VUI，写入有限范围及 BT.709 标记。保留既有时序/HRD/限制信息及其他 NAL；不下载或重编码原始像素。不支持的 profile 和异常 SPS 明确报错。已检查无 VUI、有 VUI、重复编辑、非 SPS 保持原样及异常输入拒绝。
+
+源测试颜色 RGB=(204,68,34)，三帧独立默认解码均得到平均 RGB=(203,67,32)，每通道误差小于 4。未指定外部颜色覆盖参数，解码器使用码流中的 BT.709 标记。尚未做多色图、文字边缘、渐变或手机屏幕色彩验收。
+
+## 复现与证据
+
+- 构建：`native/scripts/build_gpu_test.cmd`，使用 /W4 /WX。
+- 普通权限合成源短测：`python native/scripts/test_native_encoder.py`。检查三帧解码数量、颜色及 SPS 编辑规则。
+- 已安装实验驱动时，管理员短测：`native/scripts/test_idd_handoff.ps1 -Encode`。自动注册虚拟屏、显示动态测试窗口、直接编码三帧、独立解码并移除测试屏。原生子进程限时 25 秒。
+- 本地证据：`artifacts/native-encode-test.txt`、`artifacts/idd-native-test.txt`、`artifacts/idd-native.framemd5`。原始桌面视频不提交仓库。
+
+## 尚待完成
+
+1. 将编码包与源时间戳接入现有 USB 协议和 Android 接收端，提供显式原生模式及兼容回退。
+2. 复用 NV12 纹理，完善编码器设备丢失、输出类型变化、IDR 重同步和长期运行资源释放。当前每帧创建独立 NV12 纹理，三帧检查不能替代性能验收。
+3. 测量捕获到编码完成、USB 与解码排队，区分首次启动和稳定运行；外部录像仍是亮屏延迟验收的必要证据。
+4. 当前 H.264 SPS 编辑只支持 Baseline，其他硬件或 profile 需要单独验证。新增路径尚未在 Tab S4 测试。
+
+实现参考：[Microsoft 异步 MFT](https://learn.microsoft.com/en-us/windows/win32/medfound/asynchronous-mfts)、[FFmpeg 对 H.264 色彩元数据的说明](https://www.ffmpeg.org/ffmpeg-bitstream-filters.html#h264_005fmetadata)。

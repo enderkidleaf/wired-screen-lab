@@ -40,7 +40,7 @@ AcquireSync 只有 S_OK 才代表取得所有权；WAIT_TIMEOUT 表示跳过，W
 
 1. 增加普通用户的授权代理和多会话隔离；当前管理员实验模式已完成实际取帧验证，不开放给所有用户。
 2. 覆盖驱动断连、模式变化和设备丢失，完成每次重新注册的新资源池协商。
-3. 编码进程按 LUID 建立同显卡设备，取最新纹理并在 GPU 内转换、编码，携带源帧时间戳。共享纹理不会自动成为现有 FFmpeg 命令行输入，仍需原生编码接入。
+3. 原生同显卡 GPU 转换、编码及源帧时间戳已完成本地接入，详见 [原生编码进度](native-gpu-encoder.md)；仍需把编码包接入 USB 手机会话。
 4. 完成设备丢失、断连、模式变化和重新协商后，先启用实验模式，保留当前桌面复制回退；不默认替换已验证链路。
 
 同步规则参考 [Microsoft AcquireSync 文档](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgikeyedmutex-acquiresync)，驱动帧归还顺序参考 [FinishedProcessingFrame 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/iddcx/nf-iddcx-iddcxswapchainfinishedprocessingframe)。
