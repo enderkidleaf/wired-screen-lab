@@ -3,7 +3,8 @@ param(
     [ValidateSet('Debug','Release')]
     [string]$Configuration = 'Release',
     [ValidateSet('x64','ARM64')]
-    [string]$Platform = 'x64'
+    [string]$Platform = 'x64',
+    [switch]$EnableGpuHandoff
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +50,9 @@ if (-not (Test-Path $driverToolset)) {
 $directoryProps = Join-Path $root 'native\idd\Directory.Build.props'
 & (Join-Path $PSScriptRoot 'configure_idd.ps1')
 $analysisOverride = Join-Path $root 'native\idd\NoStaticAnalysis.targets'
-& $msbuild $solution "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:WindowsTargetPlatformVersion=10.0.28000.0" "/p:EnableTestSign=false" "/p:RunCodeAnalysis=false" "/p:DirectoryBuildPropsPath=$directoryProps" "/p:ForceImportAfterCppTargets=$analysisOverride" /m
+$gpuHandoff = $EnableGpuHandoff.IsPresent.ToString().ToLowerInvariant()
+$driverProject=Join-Path (Split-Path $solution -Parent) 'IddSampleDriver\IddSampleDriver.vcxproj'
+& $msbuild $driverProject "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:WindowsTargetPlatformVersion=10.0.28000.0" "/p:EnableTestSign=false" "/p:RunCodeAnalysis=false" "/p:DirectoryBuildPropsPath=$directoryProps" "/p:ForceImportAfterCppTargets=$analysisOverride" "/p:WiredScreenGpuHandoff=$gpuHandoff" /m:1 /nr:false
 if ($LASTEXITCODE -ne 0) { throw 'IDD driver build failed.' }
 
 $sampleRoot = Split-Path $solution -Parent
@@ -65,6 +68,7 @@ $dll = Get-Item (Join-Path $driverPackage.FullName 'IddSampleDriver.dll')
 $inf = Get-Item (Join-Path $driverPackage.FullName 'IddSampleDriver.inf')
 
 $package = Join-Path $root 'native\dist\idd'
+if($EnableGpuHandoff){$package=Join-Path $root 'native\dist\idd-gpu'}
 New-Item -ItemType Directory -Force -Path $package | Out-Null
 Copy-Item $dll.FullName, $inf.FullName -Destination $package -Force
 $cat = Get-ChildItem $driverPackage.FullName -Filter '*.cat' -ErrorAction SilentlyContinue | Select-Object -First 1

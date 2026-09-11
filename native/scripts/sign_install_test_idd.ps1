@@ -1,7 +1,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$EnableTestSigning,
-    [switch]$UseExistingTrustedCertificate
+    [switch]$UseExistingTrustedCertificate,
+    [switch]$GpuHandoff
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,7 @@ function Assert-Administrator {
 Assert-Administrator
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $package = Join-Path $root 'native\dist\idd'
+if($GpuHandoff){$package=Join-Path $root 'native\dist\idd-gpu'}
 $inf = Join-Path $package 'IddSampleDriver.inf'
 $catalog = Get-ChildItem -Path $package -Filter '*.cat' -ErrorAction SilentlyContinue | Select-Object -First 1
 $signTool = Join-Path $root '.tools\sdk-core-nuget-28000\c\bin\10.0.28000.0\x86\signtool.exe'

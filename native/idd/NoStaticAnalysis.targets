@@ -9,4 +9,9 @@
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(WiredScreenGpuHandoff)' == 'true'">
+    <ClCompile>
+      <PreprocessorDefinitions>WIRED_SCREEN_GPU_HANDOFF;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
 </Project>

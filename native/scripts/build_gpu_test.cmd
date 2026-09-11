@@ -10,4 +10,6 @@ cd /d "%~dp0..\.."
 if not exist native\build mkdir native\build
 if not exist native\dist mkdir native\dist
 cl /nologo /MT /EHsc /std:c++17 /W4 /WX /O2 native\pc\SharedTextureTest.cpp /Fo:native\build\SharedTextureTest.obj /link d3d11.lib dxgi.lib /OUT:native\dist\SharedTextureTest.exe
+if errorlevel 1 exit /b 1
+cl /nologo /MT /EHsc /std:c++17 /W4 /WX /O2 native\pc\GpuHandoffProbe.cpp /Fo:native\build\GpuHandoffProbe.obj /link d3d11.lib dxgi.lib /OUT:native\dist\GpuHandoffProbe.exe
 exit /b %errorlevel%

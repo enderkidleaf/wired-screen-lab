@@ -105,11 +105,11 @@ public:
 class Consumer {
     std::array<ComPtr<ID3D11Texture2D>,SlotCount> textures;
     std::array<ComPtr<IDXGIKeyedMutex>,SlotCount> mutexes;
-    PoolInfo* info=nullptr;
+    const PoolInfo* info=nullptr;
     int held=-1;
 public:
     ~Consumer() { Release(); }
-    HRESULT Init(ID3D11Device* device, PoolInfo* shared, const HANDLE* handles) {
+    HRESULT Init(ID3D11Device* device, const PoolInfo* shared, const HANDLE* handles) {
         if(!device || !shared || !handles || info || shared->version!=1 || !shared->width || !shared->height ||
            shared->format!=DXGI_FORMAT_B8G8R8A8_UNORM || shared->qpcFrequency<=0) return E_INVALIDARG;
         ComPtr<IDXGIDevice> dxgi; ComPtr<IDXGIAdapter> adapter; DXGI_ADAPTER_DESC adapterDesc{};
