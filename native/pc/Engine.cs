@@ -83,7 +83,7 @@ namespace WiredScreen {
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
             string vbv=options.VbvFrames>0?" -bufsize "+((options.Bitrate*1000000L*options.VbvFrames+59)/60):" -bufsize "+options.Bitrate+"M";
             string device=options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
-            return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f h264 pipe:1";
+            return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g 60 -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f avi pipe:1";
         }
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
@@ -113,10 +113,9 @@ namespace WiredScreen {
             encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
             Task reader=Task.Run(()=>{
                 try{
-                    AnnexBFramer framer=new AnnexBFramer(bytes=>{if(!stopped)frames.Publish(bytes);});
-                    byte[] buffer=new byte[65536];int count;
-                    while(!stopped&&(count=encoder.StandardOutput.BaseStream.Read(buffer,0,buffer.Length))>0)framer.Feed(buffer,count);
-                    if(!stopped)framer.Finish();
+                    EncodedPacketReader packets=new EncodedPacketReader(encoder.StandardOutput.BaseStream);
+                    byte[] packet;
+                    while(!stopped&&packets.Read(out packet))frames.Publish(packet);
                 }finally{frames.Complete();}
             });
             Task telemetry=Task.Run(()=>{

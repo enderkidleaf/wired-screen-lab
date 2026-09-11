@@ -53,7 +53,20 @@ namespace WiredScreen {
         public void Finish(){if(hasPicture)FlushFrame();}
     }
     public static class ProtocolTests {
+        private sealed class NoReadPastEndStream:MemoryStream {
+            public NoReadPastEndStream(byte[] data):base(data){}
+            public override int Read(byte[] buffer,int offset,int count){if(Position>=Length)throw new Exception("Read beyond current frame");return base.Read(buffer,offset,Math.Min(count,1));}
+            public override int ReadByte(){if(Position>=Length)throw new Exception("Read beyond current frame");return base.ReadByte();}
+        }
         public static void Run(){
+            byte[] avi={82,73,70,70,255,255,255,255,65,86,73,32,76,73,83,84,255,255,255,255,109,111,118,105,48,48,100,99,4,0,0,0,0,0,1,101};
+            using(Stream single=new NoReadPastEndStream(avi)){
+                EncodedPacketReader packets=new EncodedPacketReader(single);byte[] picture;
+                if(!packets.Read(out picture)||picture.Length!=4||picture[3]!=101)throw new Exception("Packet waited for next frame");
+            }
+            byte[] truncated=(byte[])avi.Clone();truncated[28]=8;
+            bool rejected=false;try{byte[] ignored;new EncodedPacketReader(new MemoryStream(truncated)).Read(out ignored);}catch(EndOfStreamException){rejected=true;}
+            if(!rejected)throw new Exception("Truncated packet accepted");
             int[] vbvCounts={1,2,4};long[] vbvBits={333334,666667,1333334};
             for(int v=0;v<vbvCounts.Length;v++){
                 string args=Engine.Arguments(new Options{VbvFrames=vbvCounts[v]},"h264_nvenc");
@@ -83,7 +96,7 @@ namespace WiredScreen {
             if(!overflow)throw new Exception("Queue overload was silently ignored");
             bool consumerFailed=false;try{overloaded.Take(out latest);}catch(IOException){consumerFailed=true;}
             if(!consumerFailed)throw new Exception("Consumer continued with broken references");
-            Console.WriteLine("PASS: Annex-B boundaries, packet round trip, malformed size, ordered encoded frames, overload fail-closed");
+            Console.WriteLine("PASS: immediate single-packet delivery, truncation rejection, Annex-B boundaries, wire round trip, ordered frames, overload fail-closed");
         }
     }
 }
