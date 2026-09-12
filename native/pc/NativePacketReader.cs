@@ -4,7 +4,7 @@ using System.Text;
 namespace WiredScreen {
     public sealed class EncodedVideoFrame {
         public byte[] Data;
-        public long SourceSequence,CapturedQpc,EncodedQpc,Frequency;
+        public long SourceSequence,CapturedQpc,EncodedQpc,Frequency,PacketReadyQpc;
     }
     public sealed class NativePacketReader {
         private readonly Stream input;

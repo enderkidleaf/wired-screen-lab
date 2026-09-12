@@ -26,7 +26,15 @@ namespace WiredScreen {
         public EncodedFrameQueue(int capacity=4){if(capacity<1)throw new ArgumentOutOfRangeException("capacity");this.capacity=capacity;}
         public void Publish(byte[] frame) { Publish(new EncodedVideoFrame{Data=frame}); }
         public void Publish(EncodedVideoFrame frame) {
+            frame.PacketReadyQpc=Stopwatch.GetTimestamp();
             lock(gate) {
+                if(completed)return;
+                Stopwatch wait=Stopwatch.StartNew();
+                while(pending.Count>=capacity&&!completed){
+                    int remaining=100-(int)wait.ElapsedMilliseconds;
+                    if(remaining<=0)break;
+                    Monitor.Wait(gate,remaining);
+                }
                 if(completed)return;
                 if(pending.Count>=capacity){
                     failure=new IOException("编码帧队列过载，已停止会话以避免损坏参考帧。请重新开始。");
@@ -42,7 +50,7 @@ namespace WiredScreen {
                 while(pending.Count==0&&!completed)Monitor.Wait(gate);
                 if(failure!=null)throw failure;
                 if(pending.Count==0){frame=null;return false;}
-                frame=pending.Dequeue();return true;
+                frame=pending.Dequeue();Monitor.PulseAll(gate);return true;
             }
         }
         public void Complete(Exception error=null) { lock(gate){if(error!=null){failure=error;pending.Clear();}completed=true;Monitor.PulseAll(gate);} }
@@ -173,6 +181,8 @@ namespace WiredScreen {
                     if(stopped)break;
                     long sendQpc=Stopwatch.GetTimestamp();
                     Wire.Write(network,1,sequence,sendQpc,frame.Data);Interlocked.Increment(ref sent);
+                    long writeDoneQpc=Stopwatch.GetTimestamp();
+                    lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="send",sequence=sequence,packetBytes=frame.Data.Length,packetReadyQpc=frame.PacketReadyQpc,sendQpc=sendQpc,writeDoneQpc=writeDoneQpc,qpcFrequency=Stopwatch.Frequency,readyToSendMs=(sendQpc-frame.PacketReadyQpc)*1000.0/Stopwatch.Frequency,writeMs=(writeDoneQpc-sendQpc)*1000.0/Stopwatch.Frequency}));}
                     if(options.Native){lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="native-frame",sequence=sequence,sourceSequence=frame.SourceSequence,capturedQpc=frame.CapturedQpc,encodedQpc=frame.EncodedQpc,sendQpc=sendQpc,qpcFrequency=frame.Frequency,captureToEncodedMs=(frame.EncodedQpc-frame.CapturedQpc)*1000.0/frame.Frequency,encodedToSendMs=(sendQpc-frame.EncodedQpc)*1000.0/frame.Frequency}));}}
                     if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
                     if(options.Seconds>0&&elapsed.Elapsed.TotalSeconds>=options.Seconds)break;

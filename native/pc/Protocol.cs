@@ -113,6 +113,10 @@ namespace WiredScreen {
             if(!mailbox.Take(out latest)||latest[0]!=2)throw new Exception("Encoded frame order changed");
             mailbox.Complete();if(mailbox.Take(out latest))throw new Exception("Completed mailbox yielded a frame");
             EncodedFrameQueue overloaded=new EncodedFrameQueue(1);overloaded.Publish(new byte[]{1});
+            EncodedFrameQueue burst=new EncodedFrameQueue(1);burst.Publish(new byte[]{1});
+            var producer=System.Threading.Tasks.Task.Run(()=>burst.Publish(new byte[]{2}));
+            if(!burst.Take(out latest)||latest[0]!=1)throw new Exception("Burst first frame lost");
+            if(!producer.Wait(1000)||!burst.Take(out latest)||latest[0]!=2)throw new Exception("Burst recovery failed");
             bool overflow=false;try{overloaded.Publish(new byte[]{2});}catch(IOException){overflow=true;}
             if(!overflow)throw new Exception("Queue overload was silently ignored");
             bool consumerFailed=false;try{overloaded.Take(out latest);}catch(IOException){consumerFailed=true;}

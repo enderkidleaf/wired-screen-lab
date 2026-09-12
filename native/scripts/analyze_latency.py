@@ -39,6 +39,18 @@ def analyze(path):
     for key in ('sendToRenderAckMs','receiveToCallbackMs','receiveToRenderMs','renderCallbackLagMs'):
         values=[row[key] for row in warm if row[key]>=0 and (key in ('sendToRenderAckMs','receiveToCallbackMs') or (row['receiveToRenderMs']>=0 and row['renderCallbackLagMs']>=0))]
         result['metrics'][key]={name:percentile(values,p) for name,p in [('p50',.5),('p95',.95),('p99',.99),('max',1)]}
+    sends=[row for row in rows if row.get('type')=='send']
+    if sends:
+        start=sends[0]['sendQpc']
+        selected=[row for row in sends if (row['sendQpc']-start)/row['qpcFrequency']>=5]
+        by_sequence={row['sequence']:row for row in selected}
+        result['senderMetrics']={}
+        for key in ('readyToSendMs','writeMs'):
+            values=[row[key] for row in selected]
+            result['senderMetrics'][key]={name:percentile(values,p) for name,p in [('p50',.5),('p95',.95),('max',1)]}
+        values=[by_sequence[row['sequence']]['readyToSendMs']+row['sendToRenderAckMs'] for row in frames if row['sequence'] in by_sequence]
+        result['senderMetrics']['packetReadyToAckMs']={name:percentile(values,p) for name,p in [('p50',.5),('p95',.95),('max',1)]}
+        result['senderScope']='Five actual PC-clock seconds warmup. Ready includes publisher wait and queue residence; write is local socket acceptance, not USB delivery. Packet-ready excludes capture, encoding and unread pipe backlog; ack is not photon timing.'
     return result
 
 if __name__=='__main__':
