@@ -73,13 +73,28 @@ public:
     }
 };
 struct NativeVideoPacket { std::vector<BYTE> bytes; FrameInfo frame{}; int64_t encodedQpc=0; };
+// Event credits are independent of the application's in-flight frame limit.
+class EncoderInputCredits {
+    uint64_t available=0;
+public:
+    void Grant(){if(available==UINT64_MAX)throw std::runtime_error("Input credit overflow");++available;}
+    bool Any()const{return available!=0;}
+    void Consume(){if(!available)throw std::runtime_error("Input without event credit");--available;}
+};
+inline ComPtr<IMFMediaBuffer> AllocateEncoderOutput(DWORD size,DWORD alignment){
+    if(alignment && (alignment&(alignment-1)))throw std::runtime_error("Invalid output buffer alignment");
+    ComPtr<IMFMediaBuffer> memory;
+    // MFT reports bytes; MFCreateAlignedMemoryBuffer takes an alignment mask.
+    VideoCheck(MFCreateAlignedMemoryBuffer(size,alignment?alignment-1:0,&memory),"output allocation");
+    return memory;
+}
 class GpuVideoEncoder {
     ComPtr<IMFTransform> encoder;
     ComPtr<IMFMediaEventGenerator> events;
     ComPtr<IMFDXGIDeviceManager> manager;
     struct Pending { FrameInfo frame; ComPtr<IMFSample> sample; };
     std::map<LONGLONG,Pending> pending;
-    unsigned credits=0;LONGLONG nextPts=0;
+    EncoderInputCredits credits;LONGLONG nextPts=0;
     bool draining=false,drained=false,outputReady=false;
     static ComPtr<IMFMediaType> Type(const GUID& subtype){
         ComPtr<IMFMediaType> type;VideoCheck(MFCreateMediaType(&type),"media type");
@@ -129,14 +144,14 @@ public:
         VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,0),"begin streaming");
         VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM,0),"start streaming");
     }
-    bool CanSubmit()const{return !draining && credits>0 && pending.size()<3;}
+    bool CanSubmit()const{return !draining && credits.Any() && pending.size()<3;}
     void Submit(ID3D11Texture2D* texture,const FrameInfo& frame){
         if(!CanSubmit())throw std::runtime_error("Encoder input would exceed bounded capacity");
         ComPtr<IMFMediaBuffer> buffer;VideoCheck(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),texture,0,FALSE,&buffer),"GPU media buffer");
         ComPtr<IMFSample> sample;VideoCheck(MFCreateSample(&sample),"input sample");VideoCheck(sample->AddBuffer(buffer.Get()),"input buffer");
         const LONGLONG pts=nextPts++*10000000/60;
         VideoCheck(sample->SetSampleTime(pts),"input PTS");VideoCheck(sample->SetSampleDuration(10000000/60),"input duration");
-        VideoCheck(encoder->ProcessInput(0,sample.Get(),0),"submit GPU sample");--credits;pending.emplace(pts,Pending{frame,sample});
+        VideoCheck(encoder->ProcessInput(0,sample.Get(),0),"submit GPU sample");credits.Consume();pending.emplace(pts,Pending{frame,sample});
     }
     void Drain(){if(!draining){VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0),"end input");VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0),"drain");draining=true;}}
     bool Drained()const{return drained;}
@@ -146,7 +161,7 @@ public:
         if(hr==MF_E_NO_EVENTS_AVAILABLE)return false;VideoCheck(hr,"encoder event");
         HRESULT status=S_OK;VideoCheck(event->GetStatus(&status),"event status");VideoCheck(status,"encoder asynchronous failure");
         MediaEventType type=MEUnknown;VideoCheck(event->GetType(&type),"event type");
-        if(type==METransformNeedInput){if(credits<3)++credits;return false;}
+        if(type==METransformNeedInput){credits.Grant();return false;}
         if(type==METransformDrainComplete){drained=true;if(!pending.empty())throw std::runtime_error("Encoder drained without all submitted frames");return false;}
         if(type!=METransformHaveOutput)return false;
         outputReady=true;
@@ -154,8 +169,8 @@ public:
         MFT_OUTPUT_STREAM_INFO stream{};VideoCheck(encoder->GetOutputStreamInfo(0,&stream),"output stream");
         ComPtr<IMFSample> supplied;
         if(!(stream.dwFlags&MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)){
-            VideoCheck(MFCreateSample(&supplied),"output sample");ComPtr<IMFMediaBuffer> memory;
-            VideoCheck(MFCreateMemoryBuffer(stream.cbSize,&memory),"output allocation");VideoCheck(supplied->AddBuffer(memory.Get()),"output buffer");}
+            VideoCheck(MFCreateSample(&supplied),"output sample");auto memory=AllocateEncoderOutput(stream.cbSize,stream.cbAlignment);
+            VideoCheck(supplied->AddBuffer(memory.Get()),"output buffer");}
         MFT_OUTPUT_DATA_BUFFER result{};result.pSample=supplied.Get();DWORD flags=0;
         HRESULT hr=encoder->ProcessOutput(0,1,&result,&flags);
         ComPtr<IMFCollection> outputEvents;outputEvents.Attach(result.pEvents);

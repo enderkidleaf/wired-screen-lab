@@ -8,6 +8,7 @@ DIST = ROOT / "native" / "dist"
 ARTIFACTS = ROOT / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
 encoded = ARTIFACTS / "native-encode-test.h264"
+subprocess.run([str(DIST / "GpuHandoffProbe.exe"), "--contract-test"], timeout=10, check=True)
 subprocess.run([str(DIST / "GpuHandoffProbe.exe"), "--color-test"], timeout=10, check=True)
 result = subprocess.run(
     [str(DIST / "GpuHandoffProbe.exe"), "--encode-test", str(encoded)],

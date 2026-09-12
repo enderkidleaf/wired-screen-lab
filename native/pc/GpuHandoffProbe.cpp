@@ -178,9 +178,28 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeco
         if(!streaming)puts("PASS: three source textures converted on GPU and encoded as native H264 packets; external decode verification still required.");
     }catch(...){if(file)fclose(file);throw;}
 }
+static void CheckEncoderContracts(){
+    MediaRuntime runtime;
+    EncoderInputCredits credits;
+    // More events than the three-frame in-flight limit must survive until used.
+    for(unsigned i=0;i<8;++i)credits.Grant();
+    for(unsigned i=0;i<8;++i){if(!credits.Any())throw std::runtime_error("Lost input event");credits.Consume();}
+    if(credits.Any())throw std::runtime_error("Unexpected input credit");
+    bool rejected=false;try{credits.Consume();}catch(const std::exception&){rejected=true;}
+    if(!rejected)throw std::runtime_error("Uncredited input accepted");
+    for(DWORD alignment:{0u,1u,16u,64u,256u}){
+        auto buffer=AllocateEncoderOutput(4096,alignment);BYTE* data=nullptr;DWORD maximum=0;
+        Check(buffer->Lock(&data,&maximum,nullptr),"lock aligned output");
+        bool valid=maximum>=4096 && (!alignment || reinterpret_cast<uintptr_t>(data)%alignment==0);
+        Check(buffer->Unlock(),"unlock aligned output");
+        if(!valid)throw std::runtime_error("Output allocation contract violated");
+    }
+    puts("PASS: eight input credits preserved; uncredited input rejected; output alignment 0/1/16/64/256.");
+}
 int wmain(int argc,wchar_t** argv) {
     try {
         if(argc==1){SelfTest();return 0;}
+        if(argc==2 && wcscmp(argv[1],L"--contract-test")==0){CheckEncoderContracts();return 0;}
         if(argc==2 && wcscmp(argv[1],L"--stream-test")==0){EncodeThree(nullptr,false,1);return 0;}
         if(argc==3 && wcscmp(argv[1],L"--stream-driver")==0){wchar_t* end=nullptr;long seconds=wcstol(argv[2],&end,10);if(!end||*end||seconds<0||seconds>3600)throw std::runtime_error("Invalid stream duration");DebugPrivilege privilege;EncodeThree(nullptr,true,static_cast<int>(seconds));return 0;}
         if(argc==2 && wcscmp(argv[1],L"--color-test")==0){CheckColorSyntax();return 0;}
