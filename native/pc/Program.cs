@@ -11,29 +11,58 @@ namespace WiredScreen {
         private readonly Button start=new Button(),stop=new Button(),install=new Button(),virtualStart=new Button(),virtualStop=new Button();
         private Engine engine;
         private VirtualDisplayController virtualDisplay;
-        public MainWindow(){
+        private bool creatingDisplay;
+        public MainWindow(bool autoExtend=false){
             Text="USB 副屏实验室 · 原生版";Width=900;Height=650;MinimumSize=new Size(700,500);Font=new Font("Microsoft YaHei UI",10);BackColor=Color.FromArgb(15,23,35);ForeColor=Color.White;
             TableLayoutPanel layout=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(24),RowCount=4,ColumnCount=1};
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute,85));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,75));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,60));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(layout);
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute,85));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,75));layout.RowStyles.Add(new RowStyle(SizeType.Absolute,100));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(layout);
             Label title=new Label{Text="USB 直连，不需要网络共享。\n目标 1920×1080 / 60 fps · 可通过已安装的 IDD 驱动注册 Windows 虚拟扩展屏。",Dock=DockStyle.Fill,AutoSize=false,Font=new Font(Font.FontFamily,13)};layout.Controls.Add(title,0,0);
             FlowLayoutPanel choices=new FlowLayoutPanel{Dock=DockStyle.Fill};source.DropDownStyle=ComboBoxStyle.DropDownList;source.Width=170;source.Items.AddRange(new object[]{"动态测试画面","现有桌面画面"});source.SelectedIndex=0;
             codec.DropDownStyle=ComboBoxStyle.DropDownList;codec.Width=160;codec.Items.AddRange(new object[]{"auto","native-mf","h264_nvenc","h264_qsv","h264_amf","libx264"});codec.SelectedIndex=0;
             screen.Maximum=8;screen.Width=60;
             choices.Controls.Add(source);choices.Controls.Add(codec);choices.Controls.Add(new Label{Text="屏幕索引",AutoSize=true,Padding=new Padding(0,5,0,0)});choices.Controls.Add(screen);layout.Controls.Add(choices,0,1);
-            FlowLayoutPanel buttons=new FlowLayoutPanel{Dock=DockStyle.Fill};install.Text="安装手机 App";virtualStart.Text="注册虚拟副屏";virtualStop.Text="移除虚拟副屏";start.Text="开始 USB 投屏";stop.Text="停止";stop.Enabled=false;virtualStop.Enabled=false;
+            FlowLayoutPanel buttons=new FlowLayoutPanel{Dock=DockStyle.Fill};install.Text="安装手机 App";virtualStart.Text="启动 USB 副屏";virtualStop.Text="移除虚拟副屏";start.Text="开始 USB 投屏";stop.Text="停止";stop.Enabled=false;virtualStop.Enabled=false;
             foreach(Button b in new[]{install,virtualStart,virtualStop,start,stop}){b.Width=150;b.Height=38;b.BackColor=Color.FromArgb(145,229,194);b.ForeColor=Color.FromArgb(10,30,25);buttons.Controls.Add(b);}layout.Controls.Add(buttons,0,2);
             log.Multiline=true;log.ReadOnly=true;log.ScrollBars=ScrollBars.Vertical;log.Dock=DockStyle.Fill;log.BackColor=Color.FromArgb(8,15,25);log.ForeColor=Color.FromArgb(190,218,220);layout.Controls.Add(log,0,3);
             install.Click+=async(s,e)=>{install.Enabled=false;try{using(Engine x=new Engine()){x.Log=Write;await Task.Run(()=>x.Install());}}catch(Exception ex){Write(ex.Message);}finally{install.Enabled=true;}};
-            virtualStart.Click+=(s,e)=>{try{virtualDisplay=new VirtualDisplayController();VirtualDisplayTarget target=virtualDisplay.Start();DisplayTopology.ExtendDesktop();source.SelectedIndex=1;virtualStart.Enabled=false;virtualStop.Enabled=true;Write("Windows 已枚举 "+target.DeviceString+"（"+target.DeviceName+"）。已请求扩展桌面；请核对“显示设置”，再选择可用的屏幕索引开始投屏。");}catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("虚拟副屏未启动："+ex.Message+" 需先用 native/scripts/build_idd.ps1 构建并安装 WDK 签名的驱动包。");}};
+            virtualStart.Click+=async(s,e)=>{
+                if(!new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator)){
+                    try{
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,"--ui-extend"){UseShellExecute=true,Verb="runas",WorkingDirectory=AppDomain.CurrentDomain.BaseDirectory});
+                        Close();
+                    }catch(System.ComponentModel.Win32Exception ex){Write(ex.NativeErrorCode==1223?"已取消管理员授权，未创建副屏。":"无法获取管理员权限："+ex.Message);}
+                    return;
+                }
+                creatingDisplay=true;virtualStart.Enabled=false;start.Enabled=false;install.Enabled=false;
+                bool ready=false;
+                try{
+                    virtualDisplay=new VirtualDisplayController();
+                    VirtualDisplayTarget target=await Task.Run(()=>{
+                        VirtualDisplayTarget t=virtualDisplay.Start();
+                        DisplayTopology.ExtendDesktop();
+                        uint a,b;var deadline=System.Diagnostics.Stopwatch.StartNew();
+                        while(DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0){
+                            if(deadline.ElapsedMilliseconds>=10000)throw new Exception("副屏已创建，但画面输出尚未就绪。");
+                            System.Threading.Thread.Sleep(200);
+                        }
+                        return t;
+                    });
+                    source.SelectedIndex=1;virtualStop.Enabled=true;ready=true;
+                    Write("已创建扩展桌面 "+target.DeviceName+"，正在连接手机。");
+                }catch(Exception ex){if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}Write("副屏启动失败："+ex.Message+" 请检查管理员授权及已安装驱动的状态。");}
+                finally{creatingDisplay=false;start.Enabled=true;install.Enabled=true;virtualStart.Enabled=!ready;}
+                if(ready)start.PerformClick();
+            };
             virtualStop.Click+=(s,e)=>{if(virtualDisplay!=null){virtualDisplay.Dispose();virtualDisplay=null;}virtualStart.Enabled=true;virtualStop.Enabled=false;Write("虚拟显示器已移除。");};
             start.Click+=async(s,e)=>{
-                start.Enabled=false;install.Enabled=false;stop.Enabled=true;
+                start.Enabled=false;install.Enabled=false;stop.Enabled=true;virtualStart.Enabled=false;virtualStop.Enabled=false;source.Enabled=false;codec.Enabled=false;screen.Enabled=false;
                 Options o=new Options{Source=source.SelectedIndex==0?"test":"desktop",Encoder=codec.Text,Native=codec.Text=="native-mf",Screen=(int)screen.Value};
-                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Native&&(virtualDisplay==null||!virtualDisplay.IsRunning))throw new Exception("原生模式请先注册虚拟副屏；需要管理员权限和实验驱动。");if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;o.PreferGpu=true;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;}
+                engine=new Engine{Log=Write};try{await Task.Run(()=>{if(o.Native&&(virtualDisplay==null||!virtualDisplay.IsRunning))throw new Exception("原生模式请先注册虚拟副屏；需要管理员权限和实验驱动。");if(o.Source=="desktop"&&virtualDisplay!=null&&virtualDisplay.IsRunning){VirtualDisplayTarget t=DisplayTopology.WaitForSampleDisplay(10000);uint a,b;if(t==null||DisplayTopology.WiredScreenFindOutput(t.DeviceName,out a,out b)<0)throw new Exception("虚拟屏尚未就绪，请稍后重试。");o.Adapter=(int)a;o.Screen=(int)b;o.PreferGpu=true;}engine.Run(o);});}catch(Exception ex){Write("错误："+ex.Message);}finally{engine.Dispose();engine=null;start.Enabled=true;install.Enabled=true;stop.Enabled=false;virtualStart.Enabled=virtualDisplay==null;virtualStop.Enabled=virtualDisplay!=null;source.Enabled=true;codec.Enabled=true;screen.Enabled=true;}
             };
             stop.Click+=(s,e)=>{if(engine!=null)engine.Stop();};
-            FormClosing+=(s,e)=>{if(engine!=null)engine.Stop();if(virtualDisplay!=null)virtualDisplay.Dispose();};
-            Write("手机开启 USB 调试并授权电脑。首次使用先安装 App，再开始测试；虚拟副屏需要先构建并安装 IDD 驱动。");
+            FormClosing+=(s,e)=>{if(creatingDisplay){e.Cancel=true;Write("正在创建副屏，请等待完成后关闭。");return;}if(engine!=null)engine.Stop();if(virtualDisplay!=null)virtualDisplay.Dispose();};
+            if(autoExtend)Shown+=(s,e)=>virtualStart.PerformClick();
+            Write("手机开启 USB 调试并授权电脑。首次使用先安装 App。点击“启动 USB 副屏”会请求管理员权限，自动创建扩展屏并连接手机。");
         }
         private void Write(string text){if(IsDisposed||!IsHandleCreated)return;BeginInvoke((Action)(()=>{if(!IsDisposed){log.AppendText(DateTime.Now.ToString("HH:mm:ss")+" "+text+Environment.NewLine);if(log.TextLength>20000)log.Text=log.Text.Substring(log.TextLength-15000);}}));}
     }
@@ -73,7 +102,7 @@ namespace WiredScreen {
                     for(int i=0;i<args.Length-1;i++){if(args[i]=="--seconds")options.Seconds=int.Parse(args[i+1]);if(args[i]=="--encoder")options.Encoder=args[i+1];if(args[i]=="--screen")options.Screen=int.Parse(args[i+1]);if(args[i]=="--vbv-frames")options.VbvFrames=int.Parse(args[i+1]);}
                     using(Engine engine=new Engine()){Console.CancelKeyPress+=(s,e)=>{e.Cancel=true;engine.Stop();};engine.Run(options);}return 0;
                 }
-                Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainWindow());return 0;
+                Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainWindow(Array.IndexOf(args,"--ui-extend")>=0));return 0;
             }catch(Exception ex){Console.Error.WriteLine(ex.Message);return 1;}
         }
     }
