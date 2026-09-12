@@ -151,6 +151,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         },"video-output");drain.start();
         long last=System.nanoTime(),lastDecoded=0,lastRendered=0,received=0,lastBytes=0;
         long inputWaitNs=0,inputWaitMaxNs=0,inputSamples=0;
+        boolean initialized=false;
         try{
             while(run==epoch&&resumed&&draining.get()){
                 ByteBuffer header=ByteBuffer.wrap(exact(in,20)).order(ByteOrder.LITTLE_ENDIAN);
@@ -159,6 +160,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 byte[] data=exact(in,size);
                 if(type==1){
                     long receivedAt=System.nanoTime();
+                    if(!initialized){
+                        AvcInitialization initial=AvcInitialization.split(data);
+                        int configIndex=decoder.dequeueInputBuffer(1000000);
+                        if(configIndex<0)throw new IOException("解码器初始化缓冲超时");
+                        ByteBuffer configBuffer=decoder.getInputBuffer(configIndex);
+                        if(configBuffer==null||configBuffer.capacity()<initial.config.length)throw new IOException("解码初始化缓冲不足");
+                        configBuffer.clear();configBuffer.put(initial.config);
+                        decoder.queueInputBuffer(configIndex,0,initial.config.length,0,MediaCodec.BUFFER_FLAG_CODEC_CONFIG);
+                        data=initial.picture;initialized=true;
+                        Log.i("WiredScreen","AVC initialization: codec-config submitted before IDR");
+                    }
                     long pts=(long)sequence*1000000/60;
                     // Older Android versions may omit callbacks. Bound diagnostic
                     // state independently of the decoder; never drop video here.
@@ -169,8 +181,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     long inputWait=System.nanoTime()-inputStarted;
                     inputWaitNs+=inputWait;inputWaitMaxNs=Math.max(inputWaitMaxNs,inputWait);inputSamples++;
                     if(index<0)throw new IOException("解码器阻塞，请降低负载后重试");
-                    ByteBuffer buffer=decoder.getInputBuffer(index);if(buffer==null||buffer.capacity()<size)throw new IOException("解码缓冲不足");
-                    buffer.clear();buffer.put(data);decoder.queueInputBuffer(index,0,size,(long)sequence*1000000/60,0);received+=size;
+                    ByteBuffer buffer=decoder.getInputBuffer(index);if(buffer==null||buffer.capacity()<data.length)throw new IOException("解码缓冲不足");
+                    buffer.clear();buffer.put(data);decoder.queueInputBuffer(index,0,data.length,(long)sequence*1000000/60,0);received+=size;
                 }else if(type==2){packet(out,3,sequence,stamp,new byte[0]);}
                 else throw new IOException("未知数据包");
                 long now=System.nanoTime();double seconds=(now-last)/1e9;
@@ -190,3 +202,4 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }finally{draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();renderEvents.quitSafely();frameTimes.clear();}}
     }
 }
+
