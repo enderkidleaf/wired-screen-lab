@@ -3,6 +3,8 @@ package com.wiredscreen.usb;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -21,6 +23,8 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -34,7 +38,34 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int MAX_PACKET=4*1024*1024;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private SurfaceView video;
-    private TextView status;
+    private TextView status,details,controls,awakeButton;
+    private LinearLayout panel;
+    private ScrollView panelScroll;
+    private boolean panelHidden,keepAwake;
+    private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
+    private GradientDrawable background(int color,int radius){
+        GradientDrawable shape=new GradientDrawable();shape.setColor(color);shape.setCornerRadius(dp(radius));return shape;
+    }
+    private TextView label(String text,int size,int color){
+        TextView view=new TextView(this);view.setText(text);view.setTextSize(size);view.setTextColor(color);return view;
+    }
+    private TextView action(String text){
+        TextView view=label(text,13,Color.rgb(181,239,218));view.setGravity(Gravity.CENTER);
+        view.setMinHeight(dp(48));view.setPadding(dp(14),0,dp(14),0);
+        view.setBackground(background(0xff243c43,12));view.setContentDescription(text);return view;
+    }
+    private void setPanelHidden(boolean hidden){
+        panelHidden=hidden;panelScroll.setVisibility(hidden?View.GONE:View.VISIBLE);
+        controls.setVisibility(hidden?View.VISIBLE:View.GONE);
+        getPreferences(MODE_PRIVATE).edit().putBoolean("panelHidden",hidden).apply();
+    }
+    private void applyAwake(){
+        if(keepAwake)getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        awakeButton.setText(keepAwake?"保持亮屏 · 开":"保持亮屏 · 关");
+        awakeButton.setContentDescription(awakeButton.getText());
+        getPreferences(MODE_PRIVATE).edit().putBoolean("keepAwake",keepAwake).apply();
+    }
     private volatile boolean resumed=false;
     private volatile int epoch=0;
     private volatile LocalServerSocket listener;
@@ -44,13 +75,30 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        keepAwake=getPreferences(MODE_PRIVATE).getBoolean("keepAwake",true);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         FrameLayout frame=new FrameLayout(this);frame.setBackgroundColor(Color.BLACK);
         video=new SurfaceView(this);video.getHolder().addCallback(this);
         frame.addView(video,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
-        status=new TextView(this);status.setTextColor(Color.rgb(145,229,194));status.setTextSize(14);status.setPadding(24,12,24,12);status.setBackgroundColor(0xb0121c2b);
-        frame.addView(status,new FrameLayout.LayoutParams(-1,-2,Gravity.TOP));setContentView(frame);
+        panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(dp(20),dp(16),dp(20),dp(16));
+        panel.setBackground(background(0xee14232e,20));panel.setElevation(dp(8));
+        TextView heading=label("WIRED SCREEN  /  USB 副屏",17,Color.WHITE);heading.setTypeface(null,Typeface.BOLD);panel.addView(heading);
+        status=label("等待连接",14,Color.rgb(198,219,228));status.setPadding(0,dp(10),0,dp(12));panel.addView(status);
+        details=label("连接后显示帧率和解码信息",12,Color.rgb(143,175,190));details.setVisibility(View.GONE);details.setPadding(0,0,0,dp(12));panel.addView(details);
+        LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.HORIZONTAL);
+        TextView detailButton=action("详细信息"),hideButton=action("隐藏面板");
+        detailButton.setOnClickListener(v->{boolean visible=details.getVisibility()!=View.VISIBLE;details.setVisibility(visible?View.VISIBLE:View.GONE);detailButton.setText(visible?"收起详情":"详细信息");detailButton.setContentDescription(detailButton.getText());});
+        hideButton.setOnClickListener(v->setPanelHidden(true));
+        LinearLayout.LayoutParams half=new LinearLayout.LayoutParams(0,dp(48),1);half.setMargins(0,0,dp(8),0);actions.addView(detailButton,half);
+        actions.addView(hideButton,new LinearLayout.LayoutParams(0,dp(48),1));panel.addView(actions);
+        awakeButton=action("保持亮屏");LinearLayout.LayoutParams awakeLayout=new LinearLayout.LayoutParams(-1,dp(48));awakeLayout.topMargin=dp(8);panel.addView(awakeButton,awakeLayout);
+        awakeButton.setOnClickListener(v->{keepAwake=!keepAwake;applyAwake();});applyAwake();
+        TextView hint=label("USB 调试授权后，在电脑点击「启动 USB 副屏」。",12,Color.rgb(143,175,190));hint.setPadding(0,dp(12),0,0);panel.addView(hint);
+        FrameLayout.LayoutParams panelLayout=new FrameLayout.LayoutParams(dp(340),-2,Gravity.TOP|Gravity.LEFT);panelLayout.setMargins(dp(20),dp(16),dp(20),dp(16));panelScroll=new ScrollView(this);panelScroll.setFillViewport(false);panelScroll.addView(panel);frame.addView(panelScroll,panelLayout);
+        controls=action("控制");controls.setContentDescription("展开副屏控制面板");
+        FrameLayout.LayoutParams controlLayout=new FrameLayout.LayoutParams(dp(64),dp(48),Gravity.TOP|Gravity.RIGHT);controlLayout.setMargins(dp(16),dp(16),dp(20),0);frame.addView(controls,controlLayout);
+        controls.setOnClickListener(v->setPanelHidden(false));setContentView(frame);
+        setPanelHidden(getPreferences(MODE_PRIVATE).getBoolean("panelHidden",false));
         session=getIntent().getStringExtra("session");
         show("USB 副屏 · 请在 PC 程序点击开始。无需 Wi-Fi 或网络共享。");
     }
@@ -60,7 +108,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     public void surfaceCreated(SurfaceHolder h){startReceiver();}
     public void surfaceChanged(SurfaceHolder h,int f,int w,int z){}
     public void surfaceDestroyed(SurfaceHolder h){stopReceiver();}
-    private void show(String text){ui.post(()->status.setText(text));Log.i("WiredScreen",text);}
+    private void show(String text){ui.post(()->{status.setText(text);details.setText("等待新的连接统计");});Log.i("WiredScreen",text);}
     private synchronized void startReceiver(){
         if(!resumed||!video.getHolder().getSurface().isValid()||worker!=null)return;
         if(session==null||!session.matches("[0-9a-f]{32}")){show("USB 副屏 · 请从 PC 程序开始连接。");return;}
@@ -195,7 +243,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     stats.put("inputSamples",inputSamples);
                     packet(out,4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8));
                     inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
-                    show(String.format(java.util.Locale.US,"USB 直连 · %d × %d · 解码 %.1f / 呈现回调 %.1f fps\n%s · 低延迟模式 %s",width,height,decodeFps,renderFps,decoderName,low?"开启":"未提供"));
+                    String diagnostic=String.format(java.util.Locale.US,"解码 %.1f / 呈现回调 %.1f fps\n%s\n低延迟模式：%s",decodeFps,renderFps,decoderName,low?"开启":"未提供");
+                    ui.post(()->{status.setText("已连接 · USB 直连\n1920 × 1080 · 目标 60 帧");details.setText(diagnostic);});
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }
             }
