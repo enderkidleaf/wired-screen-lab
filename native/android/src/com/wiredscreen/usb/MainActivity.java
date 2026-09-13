@@ -5,6 +5,9 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.content.res.ColorStateList;
+import android.widget.Button;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -50,9 +53,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         TextView view=new TextView(this);view.setText(text);view.setTextSize(size);view.setTextColor(color);return view;
     }
     private TextView action(String text){
-        TextView view=label(text,13,Color.rgb(181,239,218));view.setGravity(Gravity.CENTER);
+        Button view=new Button(this);view.setText(text);view.setTextSize(13);view.setTextColor(Color.rgb(181,239,218));view.setAllCaps(false);view.setMinWidth(0);view.setGravity(Gravity.CENTER);
         view.setMinHeight(dp(48));view.setPadding(dp(14),0,dp(14),0);
-        view.setBackground(background(0xff243c43,12));view.setContentDescription(text);return view;
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x4469d8b0),background(0xff243c43,12),null));view.setContentDescription(text);return view;
     }
     private void setPanelHidden(boolean hidden){
         panelHidden=hidden;panelScroll.setVisibility(hidden?View.GONE:View.VISIBLE);
@@ -96,8 +99,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         TextView hint=label("USB 调试授权后，在电脑点击「启动 USB 副屏」。",12,Color.rgb(143,175,190));hint.setPadding(0,dp(12),0,0);panel.addView(hint);
         FrameLayout.LayoutParams panelLayout=new FrameLayout.LayoutParams(dp(340),-2,Gravity.TOP|Gravity.LEFT);panelLayout.setMargins(dp(20),dp(16),dp(20),dp(16));panelScroll=new ScrollView(this);panelScroll.setFillViewport(false);panelScroll.addView(panel);frame.addView(panelScroll,panelLayout);
         controls=action("控制");controls.setContentDescription("展开副屏控制面板");
-        FrameLayout.LayoutParams controlLayout=new FrameLayout.LayoutParams(dp(64),dp(48),Gravity.TOP|Gravity.RIGHT);controlLayout.setMargins(dp(16),dp(16),dp(20),0);frame.addView(controls,controlLayout);
-        controls.setOnClickListener(v->setPanelHidden(false));setContentView(frame);
+        FrameLayout.LayoutParams controlLayout=new FrameLayout.LayoutParams(dp(80),dp(48),Gravity.TOP|Gravity.RIGHT);controlLayout.setMargins(dp(16),dp(16),dp(20),0);frame.addView(controls,controlLayout);
+        controls.setOnClickListener(v->setPanelHidden(false));
+        frame.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+            int width=Math.min(dp(340),Math.max(dp(120),r-l-dp(40)));
+            if(panelScroll.getLayoutParams().width!=width){FrameLayout.LayoutParams bounds=(FrameLayout.LayoutParams)panelScroll.getLayoutParams();bounds.width=width;panelScroll.setLayoutParams(bounds);}
+        });setContentView(frame);
         setPanelHidden(getPreferences(MODE_PRIVATE).getBoolean("panelHidden",false));
         session=getIntent().getStringExtra("session");
         show("USB 副屏 · 请在 PC 程序点击开始。无需 Wi-Fi 或网络共享。");
@@ -108,7 +115,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     public void surfaceCreated(SurfaceHolder h){startReceiver();}
     public void surfaceChanged(SurfaceHolder h,int f,int w,int z){}
     public void surfaceDestroyed(SurfaceHolder h){stopReceiver();}
-    private void show(String text){ui.post(()->{status.setText(text);details.setText("等待新的连接统计");});Log.i("WiredScreen",text);}
+    private void show(String text){ui.post(()->{status.setText(text);details.setText("等待新的连接统计");controls.setText("未连接");controls.setTextColor(Color.rgb(240,199,137));controls.setContentDescription("未连接。展开控制面板查看连接提示");});Log.i("WiredScreen",text);}
     private synchronized void startReceiver(){
         if(!resumed||!video.getHolder().getSurface().isValid()||worker!=null)return;
         if(session==null||!session.matches("[0-9a-f]{32}")){show("USB 副屏 · 请从 PC 程序开始连接。");return;}
@@ -244,7 +251,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     packet(out,4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8));
                     inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
                     String diagnostic=String.format(java.util.Locale.US,"解码 %.1f / 呈现回调 %.1f fps\n%s\n低延迟模式：%s",decodeFps,renderFps,decoderName,low?"开启":"未提供");
-                    ui.post(()->{status.setText("已连接 · USB 直连\n1920 × 1080 · 目标 60 帧");details.setText(diagnostic);});
+                    ui.post(()->{status.setText("已连接 · USB 直连\n1920 × 1080 · 目标 60 帧");details.setText(diagnostic);controls.setText("控制");controls.setTextColor(Color.rgb(181,239,218));controls.setContentDescription("USB 已连接。展开副屏控制面板");});
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }
             }
