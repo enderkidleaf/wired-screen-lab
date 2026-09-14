@@ -75,6 +75,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private volatile LocalSocket connection;
     private Thread worker;
     private String session="";
+    // Each sample crosses three asynchronous MediaCodec boundaries. Retain the
+    // timestamps until SurfaceFlinger reports it rendered, then remove it.
+    private static final class FrameTiming {
+        final int sequence; final long stamp,receivedAt,submittedAt;
+        volatile long outputAt;
+        FrameTiming(int sequence,long stamp,long receivedAt,long submittedAt){this.sequence=sequence;this.stamp=stamp;this.receivedAt=receivedAt;this.submittedAt=submittedAt;}
+    }
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
@@ -164,7 +171,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         ByteBuffer hello=ByteBuffer.wrap(exact(in,32)).order(ByteOrder.LITTLE_ENDIAN);
         byte[] magic=new byte[8];hello.get(magic);
         if(!new String(magic,StandardCharsets.US_ASCII).equals("WSCREEN2"))throw new IOException("协议不匹配，请同时更新电脑和手机 App");
-        int width=hello.getInt(),height=hello.getInt(),fps=hello.getInt(),format=hello.getInt();
+        int width=hello.getInt(),height=hello.getInt(),fps=hello.getInt(),format=hello.getInt(),revision=hello.getInt();
         if(width!=1920||height!=1080||fps!=60||format!=1)throw new IOException("不支持的画面参数");
         final MediaCodec decoder=MediaCodec.createDecoderByType("video/avc");
         final String decoderName=decoder.getName();
@@ -182,25 +189,38 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         AtomicLong decoded=new AtomicLong(),rendered=new AtomicLong();
         AtomicBoolean draining=new AtomicBoolean(true);
         decoder.configure(config,video.getHolder().getSurface(),null,0);
-        final ConcurrentHashMap<Long,long[]> frameTimes=new ConcurrentHashMap<>();
+        final ConcurrentHashMap<Long,FrameTiming> frameTimes=new ConcurrentHashMap<>();
+        final AtomicLong submittedToOutputNs=new AtomicLong(),submittedToOutputSamples=new AtomicLong();
+        final AtomicLong outputReleaseNs=new AtomicLong(),outputReleaseSamples=new AtomicLong();
         final HandlerThread renderEvents=new HandlerThread("render-events");renderEvents.start();
         decoder.setOnFrameRenderedListener((c,pts,ns)->{
             rendered.incrementAndGet();
-            long[] timing=frameTimes.remove(pts);
+            FrameTiming timing=frameTimes.remove(pts);
             if(timing!=null){
                 long now=System.nanoTime();
                 {
-                    byte[] metrics=ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putLong(ns-timing[2]).putLong(now-ns).array();
-                    try{packet(out,5,(int)timing[0],timing[1],metrics);}catch(IOException e){try{socket.close();}catch(IOException ignored){}}
+                    byte[] metrics=ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putLong(ns-timing.receivedAt).putLong(now-ns).array();
+                    try{packet(out,5,timing.sequence,timing.stamp,metrics);}catch(IOException e){try{socket.close();}catch(IOException ignored){}}
                 }
             }
         },new Handler(renderEvents.getLooper()));
         decoder.start();fitVideo(width,height);
+        // The original ready marker only means the LocalSocket exists. V2 waits
+        // until the hardware decoder owns a Surface, preventing cold-start USB
+        // buffering from overflowing the sender before frame zero is accepted.
+        if(revision>=2){out.write("WCODEC01".getBytes(StandardCharsets.US_ASCII));out.flush();}
         Thread drain=new Thread(()->{
             MediaCodec.BufferInfo info=new MediaCodec.BufferInfo();
             try{while(draining.get()&&run==epoch){
                 int index=decoder.dequeueOutputBuffer(info,10000);
-                if(index>=0){decoded.incrementAndGet();decoder.releaseOutputBuffer(index,true);}
+                if(index>=0){
+                    decoded.incrementAndGet();
+                    FrameTiming timing=frameTimes.get(info.presentationTimeUs);
+                    long outputAt=System.nanoTime();
+                    if(timing!=null){timing.outputAt=outputAt;submittedToOutputNs.addAndGet(outputAt-timing.submittedAt);submittedToOutputSamples.incrementAndGet();}
+                    decoder.releaseOutputBuffer(index,true);
+                    if(timing!=null){outputReleaseNs.addAndGet(System.nanoTime()-outputAt);outputReleaseSamples.incrementAndGet();}
+                }
                 else if(index==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED){Log.i("WiredScreen","Output "+decoder.getOutputFormat());}
             }}catch(Exception e){if(draining.get())Log.e("WiredScreen","Decoder drain",e);draining.set(false);try{socket.close();}catch(Exception ignored){}}
         },"video-output");drain.start();
@@ -230,14 +250,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     // Older Android versions may omit callbacks. Bound diagnostic
                     // state independently of the decoder; never drop video here.
                     if(frameTimes.size()>=256)frameTimes.clear();
-                    frameTimes.put(pts,new long[]{sequence,stamp,receivedAt});
                     long inputStarted=System.nanoTime();
                     int index=decoder.dequeueInputBuffer(1000000);
                     long inputWait=System.nanoTime()-inputStarted;
                     inputWaitNs+=inputWait;inputWaitMaxNs=Math.max(inputWaitMaxNs,inputWait);inputSamples++;
                     if(index<0)throw new IOException("解码器阻塞，请降低负载后重试");
                     ByteBuffer buffer=decoder.getInputBuffer(index);if(buffer==null||buffer.capacity()<data.length)throw new IOException("解码缓冲不足");
-                    buffer.clear();buffer.put(data);decoder.queueInputBuffer(index,0,data.length,(long)sequence*1000000/60,0);received+=size;
+                    buffer.clear();buffer.put(data);
+                    long submittedAt=System.nanoTime();
+                    frameTimes.put(pts,new FrameTiming(sequence,stamp,receivedAt,submittedAt));
+                    decoder.queueInputBuffer(index,0,data.length,pts,0);received+=size;
                 }else if(type==2){packet(out,3,sequence,stamp,new byte[0]);}
                 else throw new IOException("未知数据包");
                 long now=System.nanoTime();double seconds=(now-last)/1e9;
@@ -248,6 +270,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     stats.put("inputWaitMeanMs",inputSamples==0?0:inputWaitNs/1e6/inputSamples);
                     stats.put("inputWaitMaxMs",inputWaitMaxNs/1e6);
                     stats.put("inputSamples",inputSamples);
+                    long outputSamples=submittedToOutputSamples.getAndSet(0),releaseSamples=outputReleaseSamples.getAndSet(0);
+                    long outputNs=submittedToOutputNs.getAndSet(0),releaseNs=outputReleaseNs.getAndSet(0);
+                    stats.put("submitToOutputMeanMs",outputSamples==0?0:outputNs/1e6/outputSamples);
+                    stats.put("outputReleaseMeanMs",releaseSamples==0?0:releaseNs/1e6/releaseSamples);
+                    stats.put("decoderInFlight",frameTimes.size());
                     packet(out,4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8));
                     inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
                     String diagnostic=String.format(java.util.Locale.US,"解码 %.1f / 呈现回调 %.1f fps\n%s\n低延迟模式：%s",decodeFps,renderFps,decoderName,low?"开启":"未提供");

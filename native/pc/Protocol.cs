@@ -27,7 +27,7 @@ namespace WiredScreen {
         }
         public static void Hello(Stream output) {
             byte[] h=new byte[32];Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("WSCREEN2"),0,h,0,8);
-            Buffer.BlockCopy(BitConverter.GetBytes(1920),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(1080),0,h,12,4);Buffer.BlockCopy(BitConverter.GetBytes(60),0,h,16,4);Buffer.BlockCopy(BitConverter.GetBytes(1),0,h,20,4);output.Write(h,0,h.Length);
+            Buffer.BlockCopy(BitConverter.GetBytes(1920),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(1080),0,h,12,4);Buffer.BlockCopy(BitConverter.GetBytes(60),0,h,16,4);Buffer.BlockCopy(BitConverter.GetBytes(1),0,h,20,4);Buffer.BlockCopy(BitConverter.GetBytes(2),0,h,24,4);output.Write(h,0,h.Length);
         }
     }
     // FFmpeg inserts AUD NAL units. Split at AUD boundaries, never in the middle of a frame.
@@ -94,6 +94,8 @@ namespace WiredScreen {
                 if(!args.Contains(" -bufsize "+vbvBits[v]+" "))throw new Exception("VBV must equal bitrate * frames / framerate");
             }
             if(!Engine.Arguments(new Options{Source="desktop",Adapter=1},"h264_qsv").Contains("-init_hw_device d3d11va=cap:1"))throw new Exception("Capture adapter selection lost");
+            Options v2=new Options();v2.UseFreshnessV2();string v2Args=Engine.Arguments(v2,"h264_nvenc");
+            if(!v2Args.Contains("-g 120")||!v2Args.Contains("-bufsize 800000"))throw new Exception("V2 profile lost its bounded encoder settings");
             byte[] source={0,0,0,1,9,0xf0,0,0,1,0x67,0x42,0,0,1,0x65,1,2,3,0,0,0,1,9,0xf0,0,0,1,0x41,4,5};
             byte[][] reference=null;
             for(int chunk=1;chunk<=source.Length;chunk++){
