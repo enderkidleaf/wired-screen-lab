@@ -219,8 +219,12 @@ namespace WiredScreen {
                     // burst. Pace packets at the declared display rate so a
                     // USB buffer cannot turn that burst into display latency.
                     if(sequence==0)pacingStart=Stopwatch.GetTimestamp();
-                    long due=pacingStart+(long)sequence*Stopwatch.Frequency/60;
-                    while(!stopped){long remaining=due-Stopwatch.GetTimestamp();if(remaining<=0)break;int wait=(int)(remaining*1000/Stopwatch.Frequency);if(wait>0)Thread.Sleep(Math.Min(wait,10));else Thread.SpinWait(64);}
+                    // The native D3D11/MF path has one frame in flight and
+                    // therefore provides its own backpressure. Applying a
+                    // second nominal-60Hz scheduler here accumulates delay
+                    // whenever the desktop source jitters.
+                    long due=options.Native?frame.PacketReadyQpc:pacingStart+(long)sequence*Stopwatch.Frequency/60;
+                    if(!options.Native)while(!stopped){long remaining=due-Stopwatch.GetTimestamp();if(remaining<=0)break;int wait=(int)(remaining*1000/Stopwatch.Frequency);if(wait>0)Thread.Sleep(Math.Min(wait,10));else Thread.SpinWait(64);}
                     long sendQpc=Stopwatch.GetTimestamp();
                     Wire.Write(network,1,sequence,sendQpc,frame.Data);Interlocked.Increment(ref sent);
                     long writeDoneQpc=Stopwatch.GetTimestamp();
