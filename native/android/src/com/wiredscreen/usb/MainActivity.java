@@ -41,6 +41,9 @@ import org.json.JSONObject;
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int MAX_PACKET=4*1024*1024;
+    // Keep one foreground ADB endpoint across PC reconnects. Per-session
+    // socket names race with decoder shutdown after a cable/session break.
+    private static final String USB_ENDPOINT="wiredscreen_usb";
     private final Handler ui=new Handler(Looper.getMainLooper());
     private SurfaceView video;
     private TextView status,details,controls,awakeButton;
@@ -76,7 +79,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private volatile LocalServerSocket listener;
     private volatile LocalSocket connection;
     private Thread worker;
-    private String session="";
     // Each sample crosses three asynchronous MediaCodec boundaries. Retain the
     // timestamps until SurfaceFlinger reports it rendered, then remove it.
     private static final class FrameTiming {
@@ -121,10 +123,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             if(panelScroll.getLayoutParams().width!=width){FrameLayout.LayoutParams bounds=(FrameLayout.LayoutParams)panelScroll.getLayoutParams();bounds.width=width;panelScroll.setLayoutParams(bounds);}
         });setContentView(frame);
         setPanelHidden(getPreferences(MODE_PRIVATE).getBoolean("panelHidden",false));
-        session=getIntent().getStringExtra("session");
         show("USB 副屏 · 请在 PC 程序点击开始。无需 Wi-Fi 或网络共享。");
     }
-    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);stopReceiver();session=intent.getStringExtra("session");startReceiver();}
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);startReceiver();}
     @Override protected void onResume(){super.onResume();resumed=true;startReceiver();}
     @Override protected void onPause(){resumed=false;stopReceiver();super.onPause();}
     public void surfaceCreated(SurfaceHolder h){startReceiver();}
@@ -133,16 +134,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void show(String text){ui.post(()->{status.setText(text);details.setText("等待新的连接统计");controls.setText("未连接");controls.setTextColor(Color.rgb(240,199,137));controls.setContentDescription("未连接。展开控制面板查看连接提示");});Log.i("WiredScreen",text);}
     private synchronized void startReceiver(){
         if(!resumed||!video.getHolder().getSurface().isValid()||worker!=null)return;
-        if(session==null||!session.matches("[0-9a-f]{32}")){show("USB 副屏 · 请从 PC 程序开始连接。");return;}
-        final String token=session;final int run=++epoch;
+        final int run=++epoch;
         worker=new Thread(()->{
             try{
-                LocalServerSocket own=new LocalServerSocket("wiredscreen_"+token);listener=own;
+                LocalServerSocket own=new LocalServerSocket(USB_ENDPOINT);listener=own;
                 show("USB 通道已就绪 · 等待电脑视频");
                 while(run==epoch&&resumed){
                     LocalSocket socket=own.accept();connection=socket;
                     try{receive(socket,run);}catch(Exception ex){if(run==epoch)show("连接结束："+ex.getMessage()+"。请在 PC 重新开始。");}
-                    finally{try{socket.close();}catch(Exception ignored){}connection=null;}
+                    finally{try{socket.close();}catch(Exception ignored){}connection=null;if(run==epoch&&resumed)show("USB 通道已就绪 · 等待电脑视频");}
                 }
             }catch(Exception ex){if(run==epoch)show("USB 接收错误："+ex.getMessage());}
             finally{

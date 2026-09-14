@@ -146,9 +146,10 @@ namespace WiredScreen {
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
             if(options.Native&&(options.Source!="desktop"||options.Bitrate!=20||options.VbvFrames!=0))throw new ArgumentException("原生模式目前需要虚拟桌面、20 Mbps 和默认 VBV 参数。");
             string codec=options.Native?"native-mf":ChooseEncoder(options);if(stopped)return;
-            string session=Guid.NewGuid().ToString("N");
-            Adb("shell am start -n com.wiredscreen.usb/.MainActivity --es session "+session);
-            port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_"+session));
+            // Android keeps this ADB-only endpoint alive after a PC session
+            // ends, avoiding the previous Activity/decoder shutdown race.
+            Adb("shell am start -n com.wiredscreen.usb/.MainActivity");
+            port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_usb"));
             NetworkStream network=null;
             for(int n=0;n<30&&!stopped;n++){
                 try{
