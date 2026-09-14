@@ -60,6 +60,9 @@ namespace WiredScreen {
             }
         }
         public void Complete(Exception error=null) { lock(gate){if(error!=null){failure=error;pending.Clear();}completed=true;Monitor.PulseAll(gate);} }
+        // Used only between two independent encoder generations. Frames from
+        // the bootstrap generation cannot be used after its replacement IDR.
+        public void Discard() { lock(gate){pending.Clear();shrinking=false;Monitor.PulseAll(gate);} }
         public void SetCapacity(int value) { if(value<1)throw new ArgumentOutOfRangeException("value");lock(gate){capacity=value;shrinking=pending.Count>=capacity;Monitor.PulseAll(gate);} }
     }
     public sealed class Engine : IDisposable {
@@ -75,6 +78,28 @@ namespace WiredScreen {
         private double rtt=0;
         private StreamWriter report;
         private EncodedFrameQueue frames;
+        private Task StartEncoderReader(Options options,string codec,EncodedFrameQueue target){
+            ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,options.Native?"GpuHandoffProbe.exe":"ffmpeg.exe"),options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardErrorEncoding=Encoding.UTF8};
+            Process started=Process.Start(info);encoder=started;
+            started.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};started.BeginErrorReadLine();
+            return Task.Run(()=>{
+                try{
+                    if(options.Native){
+                        NativePacketReader packets=new NativePacketReader(started.StandardOutput.BaseStream);EncodedVideoFrame packet;
+                        while(!stopped&&packets.Read(out packet)){if(packet.Frequency!=Stopwatch.Frequency)throw new IOException("Native clock frequency mismatch");target.Publish(packet);}
+                    } else {
+                        EncodedPacketReader packets=new EncodedPacketReader(started.StandardOutput.BaseStream);byte[] packet;
+                        while(!stopped&&packets.Read(out packet))target.Publish(packet);
+                    }
+                }catch(Exception ex){if(!stopped)target.Complete(ex);}finally{target.Complete();}
+            });
+        }
+        private void StopEncoderGeneration(Task reader){
+            try{if(encoder!=null&&!encoder.HasExited)encoder.Kill();}catch{}
+            try{reader.Wait(3000);}catch{}
+            try{if(encoder!=null)encoder.Dispose();}catch{}
+            encoder=null;
+        }
         public static string Command(string file,string args,int timeout){
             ProcessStartInfo info=new ProcessStartInfo(file,args){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
             using(Process p=Process.Start(info)){
@@ -189,19 +214,8 @@ namespace WiredScreen {
             // first codec output is configured. V2 absorbs that one-time
             // startup burst, then returns to the normal four-frame bound.
             frames=new EncodedFrameQueue(options.FreshnessV2?256:4);
-            ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,options.Native?"GpuHandoffProbe.exe":"ffmpeg.exe"),options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardErrorEncoding=Encoding.UTF8};
-            encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
-            Task reader=Task.Run(()=>{
-                try{
-                    if(options.Native){
-                        NativePacketReader packets=new NativePacketReader(encoder.StandardOutput.BaseStream);EncodedVideoFrame packet;
-                        while(!stopped&&packets.Read(out packet)){if(packet.Frequency!=Stopwatch.Frequency)throw new IOException("Native clock frequency mismatch");frames.Publish(packet);}
-                    } else {
-                        EncodedPacketReader packets=new EncodedPacketReader(encoder.StandardOutput.BaseStream);byte[] packet;
-                        while(!stopped&&packets.Read(out packet))frames.Publish(packet);
-                    }
-                }catch(Exception ex){if(!stopped)frames.Complete(ex);}finally{frames.Complete();}
-            });
+            Task reader=StartEncoderReader(options,codec,frames);
+            ManualResetEventSlim bootstrapRendered=new ManualResetEventSlim(false);
             Task telemetry=Task.Run(()=>{
                 try{while(!stopped){
                     Packet packet=Wire.Read(network);
@@ -215,7 +229,7 @@ namespace WiredScreen {
                         // device clock. The sum cancels it and measures only
                         // receiver-local arrival to callback handling.
                         lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="frame",schemaVersion=2,sequence=packet.Sequence,sendToRenderAckMs=confirmed,receiveToCallbackMs=receiver+callbackLag,renderTimestampValid=receiver>=0&&callbackLag>=0,receiveToRenderMs=receiver,renderCallbackLagMs=callbackLag}));}
-                        if(options.FreshnessV2&&packet.Sequence==0&&frames!=null){frames.SetCapacity(4);Log("V2 首帧已呈现；传输队列恢复为 4 帧上限。");}
+                        if(options.FreshnessV2&&packet.Sequence==0)bootstrapRendered.Set();
                     }
                     else if(packet.Kind==4){
                         string json=Encoding.UTF8.GetString(packet.Data);Dictionary<string,object> stats=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);
@@ -225,11 +239,17 @@ namespace WiredScreen {
                     } else throw new InvalidDataException("Unknown receiver packet");
                 }}catch(Exception ex){if(!stopped){Log("接收统计中断："+ex.Message);Stop();}}
             });
-            Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;long pacingStart=0;
+            Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;long pacingStart=0;bool resetPacingOnNextFrame=false;
             try{
                 EncodedVideoFrame frame;
                 while(frames.Take(out frame)){
                     if(stopped)break;
+                    if(resetPacingOnNextFrame){
+                        // Encoder startup can take hundreds of milliseconds.
+                        // Start its 60 Hz schedule only once its new IDR exists.
+                        pacingStart=Stopwatch.GetTimestamp()-(long)sequence*Stopwatch.Frequency/60;
+                        resetPacingOnNextFrame=false;
+                    }
                     // Capture APIs can release duplicate desktop frames in a
                     // burst. Pace packets at the declared display rate so a
                     // USB buffer cannot turn that burst into display latency.
@@ -246,6 +266,19 @@ namespace WiredScreen {
                     lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="send",sequence=sequence,packetBytes=frame.Data.Length,packetReadyQpc=frame.PacketReadyQpc,sendQpc=sendQpc,writeDoneQpc=writeDoneQpc,targetSendQpc=due,qpcFrequency=Stopwatch.Frequency,scheduleErrorMs=(sendQpc-due)*1000.0/Stopwatch.Frequency,readyToSendMs=(sendQpc-frame.PacketReadyQpc)*1000.0/Stopwatch.Frequency,writeMs=(writeDoneQpc-sendQpc)*1000.0/Stopwatch.Frequency}));}
                     if(options.Native){lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="native-frame",sequence=sequence,sourceSequence=frame.SourceSequence,capturedQpc=frame.CapturedQpc,encodedQpc=frame.EncodedQpc,sendQpc=sendQpc,qpcFrequency=frame.Frequency,captureToEncodedMs=(frame.EncodedQpc-frame.CapturedQpc)*1000.0/frame.Frequency,encodedToSendMs=(sendQpc-frame.EncodedQpc)*1000.0/frame.Frequency}));}}
                     if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
+                    // The decoder needs a small output cadence window after
+                    // its first IDR. Once frame zero has reached the Surface,
+                    // replace that startup generation with a fresh IDR and
+                    // throw its queued history away.
+                    if(options.FreshnessV2&&sequence==6){
+                        Log("V2 初始化窗口已发送；等待手机确认首帧显示后切换到最新关键帧。");
+                        if(!bootstrapRendered.Wait(5000))throw new IOException("手机未确认显示启动帧，未进入低延迟正式传输。");
+                        Log("V2 启动帧已显示；丢弃启动积压并重启编码器生成新的关键帧。");
+                        EncodedFrameQueue oldFrames=frames;oldFrames.Discard();StopEncoderGeneration(reader);
+                        if(stopped)break;
+                        resetPacingOnNextFrame=true;
+                        frames=new EncodedFrameQueue(4);stderr="";reader=StartEncoderReader(options,codec,frames);
+                    }
                     if(options.Seconds>0&&elapsed.Elapsed.TotalSeconds>=options.Seconds)break;
                 }
                 if(reader.IsFaulted)throw reader.Exception.GetBaseException();

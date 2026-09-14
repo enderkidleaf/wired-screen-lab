@@ -116,6 +116,8 @@ namespace WiredScreen {
             if(!mailbox.Take(out latest)||latest[0]!=1)throw new Exception("Encoded reference frame lost");
             if(!mailbox.Take(out latest)||latest[0]!=2)throw new Exception("Encoded frame order changed");
             mailbox.Complete();if(mailbox.Take(out latest))throw new Exception("Completed mailbox yielded a frame");
+            EncodedFrameQueue bootstrap=new EncodedFrameQueue(2);bootstrap.Publish(new byte[]{3});bootstrap.Publish(new byte[]{4});bootstrap.Discard();bootstrap.Publish(new byte[]{5});
+            if(!bootstrap.Take(out latest)||latest[0]!=5)throw new Exception("Bootstrap backlog was not discarded before replacement keyframe");
             EncodedFrameQueue overloaded=new EncodedFrameQueue(1);overloaded.Publish(new byte[]{1});
             EncodedFrameQueue burst=new EncodedFrameQueue(1);burst.Publish(new byte[]{1});
             var producer=System.Threading.Tasks.Task.Run(()=>burst.Publish(new byte[]{2}));
