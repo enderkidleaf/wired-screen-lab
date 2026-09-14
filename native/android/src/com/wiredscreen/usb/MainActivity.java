@@ -3,6 +3,7 @@ package com.wiredscreen.usb;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
@@ -20,7 +21,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
-import android.view.SurfaceHolder;
+import android.view.Surface;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
@@ -28,9 +29,14 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.opengl.GLES11Ext;
+import android.opengl.GLES20;
+import android.opengl.GLSurfaceView;
+import android.opengl.Matrix;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,13 +45,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import org.json.JSONObject;
 
-public class MainActivity extends Activity implements SurfaceHolder.Callback {
+public class MainActivity extends Activity {
     private static final int MAX_PACKET=4*1024*1024;
     // Keep one foreground ADB endpoint across PC reconnects. Per-session
     // socket names race with decoder shutdown after a cable/session break.
     private static final String USB_ENDPOINT="wiredscreen_usb";
     private final Handler ui=new Handler(Looper.getMainLooper());
-    private SurfaceView video;
+    private LatestFrameEglView video;
     private TextView status,details,controls,awakeButton;
     private LinearLayout panel;
     private ScrollView panelScroll;
@@ -98,7 +104,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         keepAwake=getPreferences(MODE_PRIVATE).getBoolean("keepAwake",true);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         FrameLayout frame=new FrameLayout(this);frame.setBackgroundColor(Color.BLACK);
-        video=new SurfaceView(this);video.getHolder().addCallback(this);
+        video=new LatestFrameEglView(this,()->startReceiver());
         frame.addView(video,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(dp(20),dp(16),dp(20),dp(16));
         panel.setBackground(background(0xee14232e,20));panel.setElevation(dp(8));
@@ -126,14 +132,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         show("USB 副屏 · 请在 PC 程序点击开始。无需 Wi-Fi 或网络共享。");
     }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);startReceiver();}
-    @Override protected void onResume(){super.onResume();resumed=true;startReceiver();}
-    @Override protected void onPause(){resumed=false;stopReceiver();super.onPause();}
-    public void surfaceCreated(SurfaceHolder h){startReceiver();}
-    public void surfaceChanged(SurfaceHolder h,int f,int w,int z){}
-    public void surfaceDestroyed(SurfaceHolder h){stopReceiver();}
+    @Override protected void onResume(){super.onResume();resumed=true;video.onResume();startReceiver();}
+    @Override protected void onPause(){resumed=false;stopReceiver();video.onPause();super.onPause();}
     private void show(String text){ui.post(()->{status.setText(text);details.setText("等待新的连接统计");controls.setText("未连接");controls.setTextColor(Color.rgb(240,199,137));controls.setContentDescription("未连接。展开控制面板查看连接提示");});Log.i("WiredScreen",text);}
     private synchronized void startReceiver(){
-        if(!resumed||!video.getHolder().getSurface().isValid()||worker!=null)return;
+        if(!resumed||!video.isDecoderSurfaceReady()||worker!=null)return;
         final int run=++epoch;
         worker=new Thread(()->{
             try{
@@ -204,7 +207,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if(item!=null)packet(out,item.type,item.sequence,item.stamp,item.data);
             }}catch(Exception ignored){reporting.set(false);try{socket.close();}catch(Exception ignoredClose){}}
         },"usb-telemetry");
-        decoder.configure(config,video.getHolder().getSurface(),null,0);
+        Surface decoderSurface=video.getDecoderSurface();
+        if(decoderSurface==null)throw new IOException("EGL 渲染表面尚未就绪");
+        decoder.configure(config,decoderSurface,null,0);
         reporter.start();
         final ConcurrentHashMap<Long,FrameTiming> frameTimes=new ConcurrentHashMap<>();
         final AtomicLong submittedToOutputNs=new AtomicLong(),submittedToOutputSamples=new AtomicLong();
@@ -301,5 +306,47 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         }finally{reporting.set(false);reporter.interrupt();reporter.join(500);draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();renderEvents.quitSafely();frameTimes.clear();}}
     }
+}
+
+// MediaCodec writes into an external GL texture.  Frame callbacks mark work
+// pending; the EGL thread draws one current texture and coalesces callbacks
+// received while it was busy, avoiding a Java-side bitmap or view copy.
+final class LatestFrameEglView extends GLSurfaceView implements GLSurfaceView.Renderer, SurfaceTexture.OnFrameAvailableListener {
+    interface Ready { void run(); }
+    private final Ready readyCallback;
+    private final AtomicBoolean framePending=new AtomicBoolean(false);
+    private volatile SurfaceTexture decoderTexture;
+    private volatile Surface decoderSurface;
+    private int program,texture,position,texCoord,texMatrix;
+    private final float[] transform=new float[16];
+    private final FloatBuffer vertices=buffer(new float[]{-1f,-1f, 1f,-1f, -1f,1f, 1f,1f});
+    private final FloatBuffer coordinates=buffer(new float[]{0f,0f, 1f,0f, 0f,1f, 1f,1f});
+    LatestFrameEglView(android.content.Context context,Ready ready){
+        super(context);readyCallback=ready;setEGLContextClientVersion(2);setPreserveEGLContextOnPause(true);setRenderer(this);setRenderMode(RENDERMODE_WHEN_DIRTY);
+    }
+    private static FloatBuffer buffer(float[] values){
+        FloatBuffer result=ByteBuffer.allocateDirect(values.length*4).order(ByteOrder.nativeOrder()).asFloatBuffer();result.put(values).position(0);return result;
+    }
+    boolean isDecoderSurfaceReady(){return decoderSurface!=null;}
+    Surface getDecoderSurface(){return decoderSurface;}
+    private static int shader(int type,String source){
+        int handle=GLES20.glCreateShader(type);GLES20.glShaderSource(handle,source);GLES20.glCompileShader(handle);int[] ok=new int[1];GLES20.glGetShaderiv(handle,GLES20.GL_COMPILE_STATUS,ok,0);if(ok[0]==0)throw new IllegalStateException("EGL shader: "+GLES20.glGetShaderInfoLog(handle));return handle;
+    }
+    @Override public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 ignored,javax.microedition.khronos.egl.EGLConfig config){
+        String vertex="attribute vec4 aPosition; attribute vec2 aTexCoord; uniform mat4 uTexMatrix; varying vec2 vTexCoord; void main(){gl_Position=aPosition;vTexCoord=(uTexMatrix*vec4(aTexCoord,0.0,1.0)).xy;}";
+        String fragment="#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 vTexCoord; uniform samplerExternalOES uTexture; void main(){gl_FragColor=texture2D(uTexture,vTexCoord);}";
+        program=GLES20.glCreateProgram();GLES20.glAttachShader(program,shader(GLES20.GL_VERTEX_SHADER,vertex));GLES20.glAttachShader(program,shader(GLES20.GL_FRAGMENT_SHADER,fragment));GLES20.glLinkProgram(program);
+        int[] ok=new int[1];GLES20.glGetProgramiv(program,GLES20.GL_LINK_STATUS,ok,0);if(ok[0]==0)throw new IllegalStateException("EGL program: "+GLES20.glGetProgramInfoLog(program));
+        int[] ids=new int[1];GLES20.glGenTextures(1,ids,0);texture=ids[0];GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,texture);GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR);GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR);
+        position=GLES20.glGetAttribLocation(program,"aPosition");texCoord=GLES20.glGetAttribLocation(program,"aTexCoord");texMatrix=GLES20.glGetUniformLocation(program,"uTexMatrix");
+        SurfaceTexture source=new SurfaceTexture(texture);source.setDefaultBufferSize(1920,1080);source.setOnFrameAvailableListener(this);decoderTexture=source;decoderSurface=new Surface(source);Matrix.setIdentityM(transform,0);post(readyCallback::run);requestRender();
+    }
+    @Override public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 ignored,int width,int height){GLES20.glViewport(0,0,width,height);}
+    @Override public void onDrawFrame(javax.microedition.khronos.opengles.GL10 ignored){
+        SurfaceTexture source=decoderTexture;if(source!=null&&framePending.compareAndSet(true,false)){source.updateTexImage();source.getTransformMatrix(transform);}
+        GLES20.glClearColor(0f,0f,0f,1f);GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);if(source==null)return;
+        GLES20.glUseProgram(program);vertices.position(0);coordinates.position(0);GLES20.glEnableVertexAttribArray(position);GLES20.glVertexAttribPointer(position,2,GLES20.GL_FLOAT,false,0,vertices);GLES20.glEnableVertexAttribArray(texCoord);GLES20.glVertexAttribPointer(texCoord,2,GLES20.GL_FLOAT,false,0,coordinates);GLES20.glUniformMatrix4fv(texMatrix,1,false,transform,0);GLES20.glActiveTexture(GLES20.GL_TEXTURE0);GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,texture);GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,0,4);
+    }
+    @Override public void onFrameAvailable(SurfaceTexture ignored){framePending.set(true);requestRender();}
 }
 
