@@ -141,10 +141,25 @@ namespace WiredScreen {
             int gop=options.FreshnessV2?120:60;
             return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g "+gop+" -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f avi pipe:1";
         }
+        // Check Desktop Duplication before opening the USB video session. A
+        // process without access to the interactive desktop otherwise emits no
+        // H.264 packets and used to surface only as a misleading zero-frame
+        // transmission stop at the end of the session.
+        public static string DesktopCaptureProbeArguments(Options options){
+            string device=options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
+            return "-hide_banner -loglevel warning -nostdin "+device+"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60 -frames:v 1 -f null -";
+        }
+        private void VerifyDesktopCaptureAccess(Options options){
+            try{Command(Path.Combine(root,"ffmpeg.exe"),DesktopCaptureProbeArguments(options),10000);}
+            catch(Exception ex){
+                throw new IOException("无法访问 Windows 桌面捕获（Desktop Duplication access denied）。请从当前已登录的 Windows 桌面启动程序；如果是“启动 USB 副屏”，请选择 native-mf 原生模式。详细信息："+ex.Message,ex);
+            }
+        }
         public void Run(Options options){
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
             if(options.Native&&(options.Source!="desktop"||options.Bitrate!=20||options.VbvFrames!=0))throw new ArgumentException("原生模式目前需要虚拟桌面、20 Mbps 和默认 VBV 参数。");
+            if(options.Source=="desktop"&&!options.Native)VerifyDesktopCaptureAccess(options);
             string codec=options.Native?"native-mf":ChooseEncoder(options);if(stopped)return;
             // Use the foreground receiver first. Relaunching it on every
             // reconnect can recreate its Surface and abort decoder startup.
