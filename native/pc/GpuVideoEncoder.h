@@ -30,12 +30,18 @@ public:
     ~MediaRuntime(){if(media)MFShutdown();if(com)CoUninitialize();}
 };
 class GpuColorConverter {
+public:
+    struct Surface { ID3D11Texture2D* texture=nullptr; size_t slot=0; };
+private:
+    static constexpr size_t SurfaceCount=3;
+    struct Slot { ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11VideoProcessorOutputView> outputView; bool busy=false; };
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11VideoDevice> video;
     ComPtr<ID3D11VideoContext> videoContext;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
+    std::vector<Slot> slots; size_t nextSlot=0;
 public:
     void Init(ID3D11Device* sourceDevice){
         device=sourceDevice;device->GetImmediateContext(&context);
@@ -52,25 +58,30 @@ public:
         // Desktop RGB full range -> BT.709 limited-range NV12, also declared
         // on the encoder input/output media types below.
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE input{};input.RGB_Range=0;input.YCbCr_Matrix=1;
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE output{};output.YCbCr_Matrix=1;output.Nominal_Range=1;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};outputColor.YCbCr_Matrix=1;outputColor.Nominal_Range=1;
         videoContext->VideoProcessorSetStreamColorSpace(processor.Get(),0,&input);
-        videoContext->VideoProcessorSetOutputColorSpace(processor.Get(),&output);
-    }
-    ComPtr<ID3D11Texture2D> Convert(ID3D11Texture2D* source){
-        D3D11_TEXTURE2D_DESC input{};source->GetDesc(&input);
-        if(input.Width!=1920||input.Height!=1080||input.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||input.SampleDesc.Count!=1)throw std::runtime_error("Unexpected source texture");
+        videoContext->VideoProcessorSetOutputColorSpace(processor.Get(),&outputColor);
         D3D11_TEXTURE2D_DESC output{};output.Width=1920;output.Height=1080;output.MipLevels=1;output.ArraySize=1;output.Format=DXGI_FORMAT_NV12;
         output.SampleDesc.Count=1;output.Usage=D3D11_USAGE_DEFAULT;output.BindFlags=D3D11_BIND_RENDER_TARGET;
-        ComPtr<ID3D11Texture2D> texture;VideoCheck(device->CreateTexture2D(&output,nullptr,&texture),"NV12 texture");
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};iv.ViewDimension=D3D11_VPIV_DIMENSION_TEXTURE2D;
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};ov.ViewDimension=D3D11_VPOV_DIMENSION_TEXTURE2D;
-        ComPtr<ID3D11VideoProcessorInputView> inView;ComPtr<ID3D11VideoProcessorOutputView> outView;
-        VideoCheck(video->CreateVideoProcessorInputView(source,enumerator.Get(),&iv,&inView),"RGB view");
-        VideoCheck(video->CreateVideoProcessorOutputView(texture.Get(),enumerator.Get(),&ov,&outView),"NV12 view");
-        D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=inView.Get();
-        VideoCheck(videoContext->VideoProcessorBlt(processor.Get(),outView.Get(),0,1,&stream),"GPU color conversion");
-        context->Flush();return texture;
+        slots.resize(SurfaceCount);
+        for(auto& slot:slots){VideoCheck(device->CreateTexture2D(&output,nullptr,&slot.texture),"NV12 pool texture");VideoCheck(video->CreateVideoProcessorOutputView(slot.texture.Get(),enumerator.Get(),&ov,&slot.outputView),"NV12 pool view");}
     }
+    Surface Convert(ID3D11Texture2D* source){
+        D3D11_TEXTURE2D_DESC input{};source->GetDesc(&input);
+        if(input.Width!=1920||input.Height!=1080||input.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||input.SampleDesc.Count!=1)throw std::runtime_error("Unexpected source texture");
+        size_t selected=slots.size();for(size_t count=0;count<slots.size();++count){size_t candidate=(nextSlot+count)%slots.size();if(!slots[candidate].busy){selected=candidate;break;}}
+        if(selected==slots.size())throw std::runtime_error("NV12 conversion pool exhausted");
+        Slot& slot=slots[selected];slot.busy=true;nextSlot=(selected+1)%slots.size();
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};iv.ViewDimension=D3D11_VPIV_DIMENSION_TEXTURE2D;
+        try{ComPtr<ID3D11VideoProcessorInputView> inView;VideoCheck(video->CreateVideoProcessorInputView(source,enumerator.Get(),&iv,&inView),"RGB view");
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=inView.Get();
+            VideoCheck(videoContext->VideoProcessorBlt(processor.Get(),slot.outputView.Get(),0,1,&stream),"GPU color conversion");
+            // The keyed-mutex release below must not let the IDD producer reuse its source before the GPU consumes it.
+            context->Flush();return Surface{slot.texture.Get(),selected};
+        }catch(...){slot.busy=false;throw;}
+    }
+    void Release(size_t slot){if(slot>=slots.size()||!slots[slot].busy)throw std::runtime_error("Invalid NV12 pool release");slots[slot].busy=false;}
 };
 struct NativeVideoPacket { std::vector<BYTE> bytes; FrameInfo frame{}; int64_t encodedQpc=0; };
 // Event credits are independent of the application's in-flight frame limit.
@@ -89,10 +100,13 @@ inline ComPtr<IMFMediaBuffer> AllocateEncoderOutput(DWORD size,DWORD alignment){
     return memory;
 }
 class GpuVideoEncoder {
+    // Prefer a current desktop frame over encoder throughput: only one frame
+    // may remain in the hardware MFT at a time.
+    static constexpr size_t MaxInFlight=1;
     ComPtr<IMFTransform> encoder;
     ComPtr<IMFMediaEventGenerator> events;
     ComPtr<IMFDXGIDeviceManager> manager;
-    struct Pending { FrameInfo frame; ComPtr<IMFSample> sample; };
+    struct Pending { FrameInfo frame; ComPtr<IMFSample> sample; size_t surfaceSlot=0; };
     std::map<LONGLONG,Pending> pending;
     EncoderInputCredits credits;LONGLONG nextPts=0;
     bool draining=false,drained=false,outputReady=false;
@@ -144,18 +158,18 @@ public:
         VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,0),"begin streaming");
         VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM,0),"start streaming");
     }
-    bool CanSubmit()const{return !draining && credits.Any() && pending.size()<3;}
-    void Submit(ID3D11Texture2D* texture,const FrameInfo& frame){
+    bool CanSubmit()const{return !draining && credits.Any() && pending.size()<MaxInFlight;}
+    void Submit(const GpuColorConverter::Surface& surface,const FrameInfo& frame){
         if(!CanSubmit())throw std::runtime_error("Encoder input would exceed bounded capacity");
-        ComPtr<IMFMediaBuffer> buffer;VideoCheck(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),texture,0,FALSE,&buffer),"GPU media buffer");
+        ComPtr<IMFMediaBuffer> buffer;VideoCheck(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),surface.texture,0,FALSE,&buffer),"GPU media buffer");
         ComPtr<IMFSample> sample;VideoCheck(MFCreateSample(&sample),"input sample");VideoCheck(sample->AddBuffer(buffer.Get()),"input buffer");
         const LONGLONG pts=nextPts++*10000000/60;
         VideoCheck(sample->SetSampleTime(pts),"input PTS");VideoCheck(sample->SetSampleDuration(10000000/60),"input duration");
-        VideoCheck(encoder->ProcessInput(0,sample.Get(),0),"submit GPU sample");credits.Consume();pending.emplace(pts,Pending{frame,sample});
+        VideoCheck(encoder->ProcessInput(0,sample.Get(),0),"submit GPU sample");credits.Consume();pending.emplace(pts,Pending{frame,sample,surface.slot});
     }
     void Drain(){if(!draining){VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0),"end input");VideoCheck(encoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0),"drain");draining=true;}}
     bool Drained()const{return drained;}
-    bool Poll(NativeVideoPacket& packet){
+    bool Poll(NativeVideoPacket& packet,size_t* releasedSurface=nullptr){
         if(!outputReady){
         ComPtr<IMFMediaEvent> event;HRESULT hr=events->GetEvent(MF_EVENT_FLAG_NO_WAIT,&event);
         if(hr==MF_E_NO_EVENTS_AVAILABLE)return false;VideoCheck(hr,"encoder event");
@@ -193,7 +207,7 @@ public:
         try{packet.bytes.assign(data,data+size);}catch(...){bytes->Unlock();throw;}
         VideoCheck(bytes->Unlock(),"encoded buffer unlock");packet.bytes=H264Bt709(packet.bytes);
         LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);packet.encodedQpc=qpc.QuadPart;
-        pending.erase(found);return true;
+        if(releasedSurface)*releasedSurface=found->second.surfaceSlot;pending.erase(found);return true;
     }
 };
 }

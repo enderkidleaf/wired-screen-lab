@@ -144,8 +144,8 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeco
     try{
         while(!encoder.Drained() && GetTickCount64()<deadline){
             if(streaming&&GetTickCount64()>=finish)encoder.Drain();
-            NativeVideoPacket packet;
-            if(encoder.Poll(packet)){
+            NativeVideoPacket packet;size_t releasedSurface=0;
+            if(encoder.Poll(packet,&releasedSurface)){
                 // Native MF H.264 samples are expected to be Annex B. Do not
                 // silently treat length-prefixed bytes as a bytestream.
                 const auto& bytes=packet.bytes;
@@ -157,6 +157,7 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeco
                     if(fwrite(&header,sizeof(header),1,file)!=1)throw std::runtime_error("write packet header");
                 }
                 if(fwrite(bytes.data(),1,bytes.size(),file)!=bytes.size()||(streaming&&fflush(file)!=0))throw std::runtime_error("write encoded packet");
+                converter.Release(releasedSurface);
                 if(!streaming)printf("encoded source=%llu bytes=%zu capturedQpc=%lld encodedQpc=%lld\n",static_cast<unsigned long long>(packet.frame.sequence),bytes.size(),static_cast<long long>(packet.frame.capturedQpc),static_cast<long long>(packet.encodedQpc));++received;
             }
             if((streaming||submitted<3) && encoder.CanSubmit()){
@@ -164,12 +165,13 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeco
                 if(fromDriver){HRESULT hr=consumer.TakeLatest(&source,&frame);if(hr==S_FALSE){Sleep(1);continue;}Check(hr,"take driver texture");}
                 else{LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);frame={submitted+1,qpc.QuadPart};}
                 if(frame.sequence<=last)throw std::runtime_error("source sequence order");last=frame.sequence;
-                ComPtr<ID3D11Texture2D> nv12;
+                GpuColorConverter::Surface nv12;
                 try{nv12=converter.Convert(source);}catch(...){if(fromDriver)consumer.Release();throw;}
                 // ReleaseSync orders the queued GPU conversion's source read;
                 // encoder owns a separate NV12 surface and never holds the slot.
                 if(fromDriver)Check(consumer.Release(),"release driver source");
-                encoder.Submit(nv12.Get(),frame);++submitted;if(!streaming&&submitted==3)encoder.Drain();
+                try{encoder.Submit(nv12,frame);}catch(...){converter.Release(nv12.slot);throw;}
+                ++submitted;if(!streaming&&submitted==3)encoder.Drain();
             }
             Sleep(1);
         }
