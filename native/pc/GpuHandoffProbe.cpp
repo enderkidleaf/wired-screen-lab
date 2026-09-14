@@ -173,7 +173,9 @@ static void EncodeThree(const wchar_t* outputPath,bool fromDriver,int streamSeco
                 try{encoder.Submit(nv12,frame);}catch(...){converter.Release(nv12.slot);throw;}
                 ++submitted;if(!streaming&&submitted==3)encoder.Drain();
             }
-            Sleep(1);
+            // Avoid adding several mandatory 1 ms waits to each real-time
+            // driver frame; yield the core while keeping MFT event latency low.
+            if(streaming&&fromDriver)SwitchToThread();else Sleep(1);
         }
         if(!encoder.Drained()||(!streaming&&received!=3)||received!=submitted)throw std::runtime_error("Native encoder did not deliver all submitted packets before deadline");
         if(fclose(file)!=0){file=nullptr;throw std::runtime_error("close output");}file=nullptr;
