@@ -78,7 +78,7 @@ namespace WiredScreen {
             if(!gpu.Contains("hwmap=derive_device=qsv,vpp_qsv=")||gpu.Contains("hwdownload"))throw new Exception("GPU capture path downloads pixels");
             if(!Engine.Arguments(new Options{Source="desktop"},"h264_nvenc").Contains("hwdownload"))throw new Exception("Compatibility capture path lost");
             bool invalidGpu=false;
-            try{Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"h264_nvenc");}catch(ArgumentException){invalidGpu=true;}
+            try{Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"libx264");}catch(ArgumentException){invalidGpu=true;}
             if(!invalidGpu)throw new Exception("Unsupported GPU encoder combination accepted");
             byte[] avi={82,73,70,70,255,255,255,255,65,86,73,32,76,73,83,84,255,255,255,255,109,111,118,105,48,48,100,99,4,0,0,0,0,0,1,101};
             using(Stream single=new NoReadPastEndStream(avi)){
@@ -94,6 +94,8 @@ namespace WiredScreen {
                 if(!args.Contains(" -bufsize "+vbvBits[v]+" "))throw new Exception("VBV must equal bitrate * frames / framerate");
             }
             if(!Engine.Arguments(new Options{Source="desktop",Adapter=1},"h264_qsv").Contains("-init_hw_device d3d11va=cap:1"))throw new Exception("Capture adapter selection lost");
+            string direct=Engine.Arguments(new Options{Source="desktop",GpuFrames=true},"h264_nvenc");
+            if(!direct.Contains("hwmap=derive_device=cuda:mode=direct")||direct.Contains("hwdownload"))throw new Exception("D3D11 to NVENC direct path lost");
             Options v2=new Options();v2.UseFreshnessV2();string v2Args=Engine.Arguments(v2,"h264_nvenc");
             if(!v2Args.Contains("-g 120")||!v2Args.Contains("-bufsize 800000"))throw new Exception("V2 profile lost its bounded encoder settings");
             byte[] source={0,0,0,1,9,0xf0,0,0,1,0x67,0x42,0,0,1,0x65,1,2,3,0,0,0,1,9,0xf0,0,0,1,0x41,4,5};

@@ -16,3 +16,9 @@ V2 借鉴商用副屏产品的公开架构方向：虚拟显示器、GPU 捕获�
 稳定的 V2 实测日志为 `logs/usb-20260914-150039.jsonl`：共发送 1,315 帧，无编码队列过载；解码与呈现约 60 fps。发送端本地 socket 写入中位数为 0.26 ms。Android 端提交至硬解输出约 63–66 ms，接收至呈现回调中位数约 181 ms。设备不提供 Android 标准低延迟解码特性，主要剩余延迟在其硬解/Surface 队列。
 
 TextureView 实验曾使接收至回调约 75 ms，但呈现仅约 45 fps，且待呈现帧数增长；它已归档，未纳入稳定 V2。
+
+## Windows GPU 直通探针
+
+2026-09-14 在该机器的虚拟显示器上试验 `ddagrab → hwmap=derive_device=cuda:mode=direct → scale_cuda → h264_nvenc`。FFmpeg 在创建派生 CUDA 设备上下文时返回 `Function not implemented`，因此当前打包的 FFmpeg 不提供 D3D11 与 CUDA 共享纹理互操作。V2 保留显式 `h264_nvenc_direct` 探测选项并在失败时停止，不会静默切回兼容路径。
+
+要消除 Windows 的 `hwdownload` 与再上传，后续需要原生 D3D11/NVENC SDK 纹理输入，或将现有 Media Foundation 原生纹理编码路径提升到稳定 1080p60；单靠这份 FFmpeg 的滤镜参数无法实现。
