@@ -146,18 +146,17 @@ namespace WiredScreen {
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
             if(options.Native&&(options.Source!="desktop"||options.Bitrate!=20||options.VbvFrames!=0))throw new ArgumentException("原生模式目前需要虚拟桌面、20 Mbps 和默认 VBV 参数。");
             string codec=options.Native?"native-mf":ChooseEncoder(options);if(stopped)return;
-            // Android keeps this ADB-only endpoint alive after a PC session
-            // ends, avoiding the previous Activity/decoder shutdown race.
-            Adb("shell am start -n com.wiredscreen.usb/.MainActivity");
+            // Use the foreground receiver first. Relaunching it on every
+            // reconnect can recreate its Surface and abort decoder startup.
             port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_usb"));
-            NetworkStream network=null;
+            NetworkStream network=null;bool launchRequested=false;
             for(int n=0;n<30&&!stopped;n++){
                 try{
                     client=new TcpClient();client.NoDelay=true;client.SendBufferSize=128*1024;client.ReceiveBufferSize=16*1024;
                     client.Connect("127.0.0.1",port);NetworkStream attempt=client.GetStream();attempt.ReadTimeout=1000;
                     if(Encoding.ASCII.GetString(Wire.Exact(attempt,8))!="WREADY01")throw new IOException("Receiver handshake mismatch");
                     network=attempt;break;
-                }catch{if(client!=null)client.Close();Thread.Sleep(200);}
+                }catch{if(client!=null)client.Close();if(n==4&&!launchRequested){Adb("shell am start -n com.wiredscreen.usb/.MainActivity");launchRequested=true;}Thread.Sleep(200);}
             }
             if(network==null)throw new IOException("手机接收端未就绪，请解锁手机并保持 App 在前台");
             network.WriteTimeout=2000;network.ReadTimeout=10000;Wire.Hello(network);
