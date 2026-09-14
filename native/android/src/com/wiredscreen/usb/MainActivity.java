@@ -34,6 +34,8 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import org.json.JSONObject;
 
@@ -81,6 +83,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final int sequence; final long stamp,receivedAt,submittedAt;
         volatile long outputAt;
         FrameTiming(int sequence,long stamp,long receivedAt,long submittedAt){this.sequence=sequence;this.stamp=stamp;this.receivedAt=receivedAt;this.submittedAt=submittedAt;}
+    }
+    // Telemetry is never allowed to run on MediaCodec's render callback.
+    // A blocked USB write must lose a metric, never lock the decoder.
+    private static final class Outbound {
+        final int type,sequence; final long stamp; final byte[] data;
+        Outbound(int type,int sequence,long stamp,byte[] data){this.type=type;this.sequence=sequence;this.stamp=stamp;this.data=data;}
     }
 
     @Override public void onCreate(Bundle state){
@@ -188,7 +196,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final boolean low=lowLatency;
         AtomicLong decoded=new AtomicLong(),rendered=new AtomicLong();
         AtomicBoolean draining=new AtomicBoolean(true);
+        final AtomicBoolean reporting=new AtomicBoolean(true);
+        final ArrayBlockingQueue<Outbound> outbound=new ArrayBlockingQueue<>(128);
+        Thread reporter=new Thread(()->{
+            try{while(reporting.get()){
+                Outbound item=outbound.poll(250,TimeUnit.MILLISECONDS);
+                if(item!=null)packet(out,item.type,item.sequence,item.stamp,item.data);
+            }}catch(Exception ignored){reporting.set(false);try{socket.close();}catch(Exception ignoredClose){}}
+        },"usb-telemetry");
         decoder.configure(config,video.getHolder().getSurface(),null,0);
+        reporter.start();
         final ConcurrentHashMap<Long,FrameTiming> frameTimes=new ConcurrentHashMap<>();
         final AtomicLong submittedToOutputNs=new AtomicLong(),submittedToOutputSamples=new AtomicLong();
         final AtomicLong outputReleaseNs=new AtomicLong(),outputReleaseSamples=new AtomicLong();
@@ -200,7 +217,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 long now=System.nanoTime();
                 {
                     byte[] metrics=ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putLong(ns-timing.receivedAt).putLong(now-ns).array();
-                    try{packet(out,5,timing.sequence,timing.stamp,metrics);}catch(IOException e){try{socket.close();}catch(IOException ignored){}}
+                    outbound.offer(new Outbound(5,timing.sequence,timing.stamp,metrics));
                 }
             }
         },new Handler(renderEvents.getLooper()));
@@ -260,7 +277,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     long submittedAt=System.nanoTime();
                     frameTimes.put(pts,new FrameTiming(sequence,stamp,receivedAt,submittedAt));
                     decoder.queueInputBuffer(index,0,data.length,pts,0);received+=size;
-                }else if(type==2){packet(out,3,sequence,stamp,new byte[0]);}
+                }else if(type==2){outbound.offer(new Outbound(3,sequence,stamp,new byte[0]));}
                 else throw new IOException("未知数据包");
                 long now=System.nanoTime();double seconds=(now-last)/1e9;
                 if(seconds>=1){
@@ -275,14 +292,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     stats.put("submitToOutputMeanMs",outputSamples==0?0:outputNs/1e6/outputSamples);
                     stats.put("outputReleaseMeanMs",releaseSamples==0?0:releaseNs/1e6/releaseSamples);
                     stats.put("decoderInFlight",frameTimes.size());
-                    packet(out,4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8));
+                    outbound.offer(new Outbound(4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8)));
                     inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
                     String diagnostic=String.format(java.util.Locale.US,"解码 %.1f / 呈现回调 %.1f fps\n%s\n低延迟模式：%s",decodeFps,renderFps,decoderName,low?"开启":"未提供");
                     ui.post(()->{status.setText("已连接 · USB 直连\n1920 × 1080 · 目标 60 帧");details.setText(diagnostic);controls.setText("控制");controls.setTextColor(Color.rgb(181,239,218));controls.setContentDescription("USB 已连接。展开副屏控制面板");});
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }
             }
-        }finally{draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();renderEvents.quitSafely();frameTimes.clear();}}
+        }finally{reporting.set(false);reporter.interrupt();reporter.join(500);draining.set(false);drain.join(1500);try{decoder.stop();}finally{decoder.release();renderEvents.quitSafely();frameTimes.clear();}}
     }
 }
 

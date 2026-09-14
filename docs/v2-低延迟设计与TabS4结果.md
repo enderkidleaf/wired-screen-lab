@@ -7,6 +7,8 @@ V2 借鉴商用副屏产品的公开架构方向：虚拟显示器、GPU 捕获�
 - Windows 端新增“低延迟 V2（实验）”档：12 Mbps、4 帧 VBV、120 帧 GOP、无 B 帧和 NVENC ultra-low-latency 编码。
 - ADB localabstract 通道新增解码器就绪握手，避免 Windows 在 MediaCodec/Suface 尚未就绪时开始写帧。
 - 桌面捕获也使用 FFmpeg 源时钟节流，防止 `ddagrab` 在重复桌面画面时突发写入 USB。
+- 发送时钟从首个编码帧就绪时起算；启动期暂存会先排空到四帧，再恢复正常过载保护。
+- Android 渲染回调只把统计放进有界队列，由独立线程写回 USB，断开的连接不会再锁住 MediaCodec 回调线程。
 - Android 统计拆分为输入缓冲等待、提交至硬解输出、输出释放和待呈现帧数。
 
 ## Tab S4：1080p60 虚拟扩展屏，2026-09-14

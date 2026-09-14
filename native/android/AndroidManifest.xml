@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.wiredscreen.usb" android:versionCode="5" android:versionName="0.4.1-v2">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.wiredscreen.usb" android:versionCode="6" android:versionName="0.4.2-v2">
   <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
   <!-- Deliberately no INTERNET permission: video enters through an ADB USB localabstract socket. -->
   <application android:label="USB 副屏实验室" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true">

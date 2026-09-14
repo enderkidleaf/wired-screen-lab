@@ -24,7 +24,8 @@ namespace WiredScreen {
     public sealed class EncodedFrameQueue {
         private readonly object gate=new object();
         private readonly Queue<EncodedVideoFrame> pending=new Queue<EncodedVideoFrame>();
-        private readonly int capacity;
+        private int capacity;
+        private bool shrinking;
         private bool completed;
         private Exception failure;
         public EncodedFrameQueue(int capacity=4){if(capacity<1)throw new ArgumentOutOfRangeException("capacity");this.capacity=capacity;}
@@ -35,12 +36,13 @@ namespace WiredScreen {
                 if(completed)return;
                 Stopwatch wait=Stopwatch.StartNew();
                 while(pending.Count>=capacity&&!completed){
+                    if(shrinking){Monitor.Wait(gate);continue;}
                     int remaining=100-(int)wait.ElapsedMilliseconds;
                     if(remaining<=0)break;
                     Monitor.Wait(gate,remaining);
                 }
                 if(completed)return;
-                if(pending.Count>=capacity){
+                if(pending.Count>=capacity&&!shrinking){
                     failure=new IOException("编码帧队列过载，已停止会话以避免损坏参考帧。请重新开始。");
                     pending.Clear();completed=true;Monitor.PulseAll(gate);throw failure;
                 }
@@ -54,10 +56,11 @@ namespace WiredScreen {
                 while(pending.Count==0&&!completed)Monitor.Wait(gate);
                 if(failure!=null)throw failure;
                 if(pending.Count==0){frame=null;return false;}
-                frame=pending.Dequeue();Monitor.PulseAll(gate);return true;
+                frame=pending.Dequeue();if(pending.Count<capacity)shrinking=false;Monitor.PulseAll(gate);return true;
             }
         }
         public void Complete(Exception error=null) { lock(gate){if(error!=null){failure=error;pending.Clear();}completed=true;Monitor.PulseAll(gate);} }
+        public void SetCapacity(int value) { if(value<1)throw new ArgumentOutOfRangeException("value");lock(gate){capacity=value;shrinking=pending.Count>=capacity;Monitor.PulseAll(gate);} }
     }
     public sealed class Engine : IDisposable {
         private readonly string root=AppDomain.CurrentDomain.BaseDirectory;
@@ -156,7 +159,10 @@ namespace WiredScreen {
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
             report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=3,streamProfile=options.FreshnessV2?"freshness-v2":"stable-v1",transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.Native?"idd-d3d11-mf":options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=1920,height=1080,targetFps=60,gop=options.FreshnessV2?120:60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)}));
             Log("USB 视频通道已连接。"+(options.FreshnessV2?"低延迟 V2":"稳定 V1")+" · 编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
-            frames=new EncodedFrameQueue();
+            // Some Android builds do not read their LocalSocket until the
+            // first codec output is configured. V2 absorbs that one-time
+            // startup burst, then returns to the normal four-frame bound.
+            frames=new EncodedFrameQueue(options.FreshnessV2?256:4);
             ProcessStartInfo info=new ProcessStartInfo(Path.Combine(root,options.Native?"GpuHandoffProbe.exe":"ffmpeg.exe"),options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardErrorEncoding=Encoding.UTF8};
             encoder=Process.Start(info);encoder.ErrorDataReceived+=(s,e)=>{if(e.Data!=null){lock(gate){stderr=(stderr+e.Data+"\n");if(stderr.Length>4000)stderr=stderr.Substring(stderr.Length-4000);}}};encoder.BeginErrorReadLine();
             Task reader=Task.Run(()=>{
@@ -183,6 +189,7 @@ namespace WiredScreen {
                         // device clock. The sum cancels it and measures only
                         // receiver-local arrival to callback handling.
                         lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="frame",schemaVersion=2,sequence=packet.Sequence,sendToRenderAckMs=confirmed,receiveToCallbackMs=receiver+callbackLag,renderTimestampValid=receiver>=0&&callbackLag>=0,receiveToRenderMs=receiver,renderCallbackLagMs=callbackLag}));}
+                        if(options.FreshnessV2&&packet.Sequence==0&&frames!=null){frames.SetCapacity(4);Log("V2 首帧已呈现；传输队列恢复为 4 帧上限。");}
                     }
                     else if(packet.Kind==4){
                         string json=Encoding.UTF8.GetString(packet.Data);Dictionary<string,object> stats=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);
@@ -192,15 +199,21 @@ namespace WiredScreen {
                     } else throw new InvalidDataException("Unknown receiver packet");
                 }}catch(Exception ex){if(!stopped){Log("接收统计中断："+ex.Message);Stop();}}
             });
-            Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;
+            Stopwatch elapsed=Stopwatch.StartNew();int sequence=0;long pacingStart=0;
             try{
                 EncodedVideoFrame frame;
                 while(frames.Take(out frame)){
                     if(stopped)break;
+                    // Capture APIs can release duplicate desktop frames in a
+                    // burst. Pace packets at the declared display rate so a
+                    // USB buffer cannot turn that burst into display latency.
+                    if(sequence==0)pacingStart=Stopwatch.GetTimestamp();
+                    long due=pacingStart+(long)sequence*Stopwatch.Frequency/60;
+                    while(!stopped){long remaining=due-Stopwatch.GetTimestamp();if(remaining<=0)break;int wait=(int)(remaining*1000/Stopwatch.Frequency);if(wait>0)Thread.Sleep(Math.Min(wait,10));else Thread.SpinWait(64);}
                     long sendQpc=Stopwatch.GetTimestamp();
                     Wire.Write(network,1,sequence,sendQpc,frame.Data);Interlocked.Increment(ref sent);
                     long writeDoneQpc=Stopwatch.GetTimestamp();
-                    lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="send",sequence=sequence,packetBytes=frame.Data.Length,packetReadyQpc=frame.PacketReadyQpc,sendQpc=sendQpc,writeDoneQpc=writeDoneQpc,qpcFrequency=Stopwatch.Frequency,readyToSendMs=(sendQpc-frame.PacketReadyQpc)*1000.0/Stopwatch.Frequency,writeMs=(writeDoneQpc-sendQpc)*1000.0/Stopwatch.Frequency}));}
+                    lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="send",sequence=sequence,packetBytes=frame.Data.Length,packetReadyQpc=frame.PacketReadyQpc,sendQpc=sendQpc,writeDoneQpc=writeDoneQpc,targetSendQpc=due,qpcFrequency=Stopwatch.Frequency,scheduleErrorMs=(sendQpc-due)*1000.0/Stopwatch.Frequency,readyToSendMs=(sendQpc-frame.PacketReadyQpc)*1000.0/Stopwatch.Frequency,writeMs=(writeDoneQpc-sendQpc)*1000.0/Stopwatch.Frequency}));}
                     if(options.Native){lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="native-frame",sequence=sequence,sourceSequence=frame.SourceSequence,capturedQpc=frame.CapturedQpc,encodedQpc=frame.EncodedQpc,sendQpc=sendQpc,qpcFrequency=frame.Frequency,captureToEncodedMs=(frame.EncodedQpc-frame.CapturedQpc)*1000.0/frame.Frequency,encodedToSendMs=(sendQpc-frame.EncodedQpc)*1000.0/frame.Frequency}));}}
                     if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
                     if(options.Seconds>0&&elapsed.Elapsed.TotalSeconds>=options.Seconds)break;
