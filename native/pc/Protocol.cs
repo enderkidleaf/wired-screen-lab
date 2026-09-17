@@ -25,9 +25,9 @@ namespace WiredScreen {
             byte[] h=new byte[20];Buffer.BlockCopy(BitConverter.GetBytes(kind),0,h,0,4);Buffer.BlockCopy(BitConverter.GetBytes(data.Length),0,h,4,4);Buffer.BlockCopy(BitConverter.GetBytes(sequence),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(stamp),0,h,12,8);
             output.Write(h,0,h.Length);output.Write(data,0,data.Length);
         }
-        public static void Hello(Stream output) {
+        public static void Hello(Stream output,int width,int height,int frameRate) {
             byte[] h=new byte[32];Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("WSCREEN2"),0,h,0,8);
-            Buffer.BlockCopy(BitConverter.GetBytes(1920),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(1080),0,h,12,4);Buffer.BlockCopy(BitConverter.GetBytes(60),0,h,16,4);Buffer.BlockCopy(BitConverter.GetBytes(1),0,h,20,4);Buffer.BlockCopy(BitConverter.GetBytes(2),0,h,24,4);output.Write(h,0,h.Length);
+            Buffer.BlockCopy(BitConverter.GetBytes(width),0,h,8,4);Buffer.BlockCopy(BitConverter.GetBytes(height),0,h,12,4);Buffer.BlockCopy(BitConverter.GetBytes(frameRate),0,h,16,4);Buffer.BlockCopy(BitConverter.GetBytes(1),0,h,20,4);Buffer.BlockCopy(BitConverter.GetBytes(2),0,h,24,4);output.Write(h,0,h.Length);
         }
     }
     // FFmpeg inserts AUD NAL units. Split at AUD boundaries, never in the middle of a frame.
@@ -98,6 +98,10 @@ namespace WiredScreen {
             if(!direct.Contains("hwmap=derive_device=cuda:mode=direct")||direct.Contains("hwdownload"))throw new Exception("D3D11 to NVENC direct path lost");
             Options v2=new Options();v2.UseFreshnessV2();string v2Args=Engine.Arguments(v2,"h264_nvenc");
             if(!v2Args.Contains("-g 120")||!v2Args.Contains("-bufsize 800000"))throw new Exception("V2 profile lost its bounded encoder settings");
+            Options custom=new Options{Source="test",Width=1280,Height=720,FrameRate=30,Bitrate=9,VbvFrames=2};string customArgs=Engine.Arguments(custom,"libx264");
+            if(!customArgs.Contains("testsrc2=size=1280x720:rate=30")||!customArgs.Contains("-r 30")||!customArgs.Contains("-bufsize 600000"))throw new Exception("Custom resolution, frame rate, or VBV settings lost");
+            string temporary=Path.GetTempFileName();try{string fileArgs=Engine.Arguments(new Options{Source="file",ContentPath=temporary,Width=1280,Height=720,FrameRate=30},"libx264");if(!fileArgs.Contains("-stream_loop -1 -i")||!fileArgs.Contains("scale=1280:720"))throw new Exception("Content playback input lost its direct file path");}finally{File.Delete(temporary);}
+            using(MemoryStream hello=new MemoryStream()){Wire.Hello(hello,1280,720,30);byte[] bytes=hello.ToArray();if(BitConverter.ToInt32(bytes,8)!=1280||BitConverter.ToInt32(bytes,12)!=720||BitConverter.ToInt32(bytes,16)!=30)throw new Exception("Hello did not carry stream settings");}
             byte[] source={0,0,0,1,9,0xf0,0,0,1,0x67,0x42,0,0,1,0x65,1,2,3,0,0,0,1,9,0xf0,0,0,1,0x41,4,5};
             byte[][] reference=null;
             for(int chunk=1;chunk<=source.Length;chunk++){

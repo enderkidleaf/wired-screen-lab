@@ -19,6 +19,10 @@ namespace WiredScreen {
             int result=SetDisplayConfig(0,IntPtr.Zero,0,IntPtr.Zero,0x84); // SDC_APPLY | SDC_TOPOLOGY_EXTEND
             if(result!=0)throw new Win32Exception(result,"Windows 无法启用扩展桌面。");
         }
+        public static void CloneDesktop() {
+            int result=SetDisplayConfig(0,IntPtr.Zero,0,IntPtr.Zero,0x82); // SDC_APPLY | SDC_TOPOLOGY_CLONE
+            if(result!=0)throw new Win32Exception(result,"Windows 无法启用复制桌面。请先确认虚拟副屏已经创建，并选择两台显示器都支持的分辨率。");
+        }
         private const uint AttachedToDesktop=0x00000001;
         [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
         private struct DisplayDevice {

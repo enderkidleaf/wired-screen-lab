@@ -10,14 +10,22 @@ using System.Web.Script.Serialization;
 
 namespace WiredScreen {
     public sealed class Options {
-        public string Source="test",Encoder="auto";
-        public int Screen=0,Bitrate=20,Seconds=0,VbvFrames=0;
+        public string Source="test",Encoder="auto",ContentPath="";
+        public int Screen=0,Bitrate=20,Seconds=0,VbvFrames=0,Width=1920,Height=1080,FrameRate=60;
         public int Adapter=-1;
         public bool PreferGpu=false,GpuFrames=false,Native=false,FreshnessV2=false;
         // V2 is a deliberately constrained experiment: limit encoder
         // look-ahead/VBV pressure and make periodic recovery frames rarer.
         // Keep the stable profile untouched so both can be compared on-device.
         public void UseFreshnessV2(){FreshnessV2=true;Bitrate=12;VbvFrames=4;}
+        public void Validate(){
+            if(Width<640||Width>2560||Height<360||Height>1600)throw new ArgumentOutOfRangeException("分辨率", "支持 640×360 到 2560×1600。");
+            if(FrameRate<24||FrameRate>60)throw new ArgumentOutOfRangeException("帧率", "支持 24 到 60 fps。");
+            if(Bitrate<2||Bitrate>60)throw new ArgumentOutOfRangeException("码率", "支持 2 到 60 Mbps。");
+            if(Source!="test"&&Source!="desktop"&&Source!="file")throw new ArgumentException("未知画面来源。");
+            if(Source=="file"&&(String.IsNullOrWhiteSpace(ContentPath)||!File.Exists(ContentPath)))throw new FileNotFoundException("找不到要播放的视频文件。",ContentPath);
+            if(Native&&(Width!=1920||Height!=1080||FrameRate!=60||Bitrate!=20||VbvFrames!=0))throw new ArgumentException("native-mf 原生通路当前固定为 1920×1080 / 60 fps、20 Mbps。请改用 FFmpeg 编码器使用自定义参数。");
+        }
     }
     // Encoded P frames may reference earlier frames. Never silently discard
     // one: fail the session on overload so the next session starts at an IDR.
@@ -143,36 +151,38 @@ namespace WiredScreen {
             }
             if(requested!="auto")return requested;
             foreach(string name in new[]{"h264_nvenc","h264_qsv","h264_amf"}){
-                try{Command(Path.Combine(root,"ffmpeg.exe"),"-hide_banner -loglevel error -f lavfi -i color=size=1920x1080:rate=60 -frames:v 1 -c:v "+name+" -f null -",20000);Log("可用硬件编码器："+name);return name;}catch{ }
+                try{Command(Path.Combine(root,"ffmpeg.exe"),"-hide_banner -loglevel error -f lavfi -i color=size="+options.Width+"x"+options.Height+":rate="+options.FrameRate+" -frames:v 1 -c:v "+name+" -f null -",20000);Log("可用硬件编码器："+name);return name;}catch{ }
             }
             Log("未找到可用硬件编码器，使用软件编码；60 fps 需实测。");return "libx264";
         }
         public static string Arguments(Options options,string codec){
+            options.Validate();
             if(options.VbvFrames<0||options.VbvFrames>4)throw new ArgumentOutOfRangeException("VbvFrames");
             // ddagrab may return repeated desktop samples faster than its
             // declared frame rate. Apply the same source-clock pacing used by
             // testsrc so ADB never receives a burst larger than 60 Hz.
-            string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size=1920x1080:rate=60":"-re -f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60";
-            string filter=options.Source=="test"?"format=yuv420p":"hwdownload,format=bgra,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p";
+            string dimensions=options.Width+":"+options.Height;
+            string input=options.Source=="test"?"-re -f lavfi -i testsrc2=size="+options.Width+"x"+options.Height+":rate="+options.FrameRate:options.Source=="file"?"-re -stream_loop -1 -i \""+options.ContentPath.Replace("\"","\\\"")+"\"":"-re -f lavfi -i ddagrab=output_idx="+options.Screen+":framerate="+options.FrameRate;
+            string filter=options.Source=="test"?"format=yuv420p":options.Source=="file"?"scale="+dimensions+":force_original_aspect_ratio=decrease,pad="+dimensions+":(ow-iw)/2:(oh-ih)/2,format=yuv420p":"hwdownload,format=bgra,scale="+dimensions+":force_original_aspect_ratio=decrease,pad="+dimensions+":(ow-iw)/2:(oh-ih)/2,format=yuv420p";
             if(options.GpuFrames){
                 if(options.Source!="desktop")throw new ArgumentException("GPU texture path requires desktop capture");
-                if(codec=="h264_qsv")filter="hwmap=derive_device=qsv,vpp_qsv=w=1920:h=1080:format=nv12";
-                else if(codec=="h264_nvenc")filter="hwmap=derive_device=cuda:mode=direct,scale_cuda=w=1920:h=1080:format=nv12";
+                if(codec=="h264_qsv")filter="hwmap=derive_device=qsv,vpp_qsv=w="+options.Width+":h="+options.Height+":format=nv12";
+                else if(codec=="h264_nvenc")filter="hwmap=derive_device=cuda:mode=direct,scale_cuda=w="+options.Width+":h="+options.Height+":format=nv12";
                 else throw new ArgumentException("GPU texture path requires QSV or NVENC");
             }
             string tuning=codec=="h264_nvenc"?"-preset p1 -tune ull -rc cbr -zerolatency 1 -rc-lookahead 0":codec=="h264_qsv"?"-preset veryfast -look_ahead 0 -async_depth 1":codec=="h264_amf"?"-usage ultralowlatency -quality speed":"-preset ultrafast -tune zerolatency -x264-params repeat-headers=1:scenecut=0";
-            string vbv=options.VbvFrames>0?" -bufsize "+((options.Bitrate*1000000L*options.VbvFrames+59)/60):" -bufsize "+options.Bitrate+"M";
+            string vbv=options.VbvFrames>0?" -bufsize "+((options.Bitrate*1000000L*options.VbvFrames+options.FrameRate-1)/options.FrameRate):" -bufsize "+options.Bitrate+"M";
             string device=options.Adapter>0&&!(options.GpuFrames&&codec=="h264_nvenc")?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
-            int gop=options.FreshnessV2?120:60;
-            return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g "+gop+" -bf 0 -r 60 -bsf:v h264_metadata=aud=insert -flush_packets 1 -f avi pipe:1";
+            int gop=options.FreshnessV2?options.FrameRate*2:options.FrameRate;
+            return "-hide_banner -loglevel warning -nostdin "+device+input+" -an -vf \""+filter+"\" -c:v "+codec+" "+tuning+" -flags low_delay -threads 1 -b:v "+options.Bitrate+"M -maxrate "+options.Bitrate+"M"+vbv+" -g "+gop+" -bf 0 -r "+options.FrameRate+" -bsf:v h264_metadata=aud=insert -flush_packets 1 -f avi pipe:1";
         }
-        // Check Desktop Duplication before opening the USB video session. A
+        // Check Desktop Duplication before opening the USB video session.  A
         // process without access to the interactive desktop otherwise emits no
         // H.264 packets and used to surface only as a misleading zero-frame
         // transmission stop at the end of the session.
         public static string DesktopCaptureProbeArguments(Options options){
             string device=options.Adapter>0?"-init_hw_device d3d11va=cap:"+options.Adapter+" -filter_hw_device cap ":"";
-            return "-hide_banner -loglevel warning -nostdin "+device+"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate=60 -frames:v 1 -f null -";
+            return "-hide_banner -loglevel warning -nostdin "+device+"-f lavfi -i ddagrab=output_idx="+options.Screen+":framerate="+options.FrameRate+" -frames:v 1 -f null -";
         }
         private void VerifyDesktopCaptureAccess(Options options){
             try{Command(Path.Combine(root,"ffmpeg.exe"),DesktopCaptureProbeArguments(options),10000);}
@@ -181,13 +191,15 @@ namespace WiredScreen {
             }
         }
         public void Run(Options options){
+            options.Validate();
             if(Adb("get-state")!="device")throw new IOException("没有已授权的 USB 设备");
             Log("已确认 USB 设备："+Adb("shell getprop ro.product.model"));
-            if(options.Native&&(options.Source!="desktop"||options.Bitrate!=20||options.VbvFrames!=0))throw new ArgumentException("原生模式目前需要虚拟桌面、20 Mbps 和默认 VBV 参数。");
+            if(options.Native&&options.Source!="desktop")throw new ArgumentException("native-mf 原生通路只能捕获 Windows 桌面。");
             if(options.Source=="desktop"&&!options.Native)VerifyDesktopCaptureAccess(options);
             string codec=options.Native?"native-mf":ChooseEncoder(options);if(stopped)return;
-            // Use the foreground receiver first. Relaunching it on every
-            // reconnect can recreate its Surface and abort decoder startup.
+            // The foreground Android activity keeps this endpoint alive.
+            // Do not relaunch it on every PC reconnect: some devices rebuild
+            // the Surface and tear down a just-created decoder when started.
             port=int.Parse(Adb("forward tcp:0 localabstract:wiredscreen_usb"));
             NetworkStream network=null;bool launchRequested=false;
             for(int n=0;n<30&&!stopped;n++){
@@ -199,7 +211,7 @@ namespace WiredScreen {
                 }catch{if(client!=null)client.Close();if(n==4&&!launchRequested){Adb("shell am start -n com.wiredscreen.usb/.MainActivity");launchRequested=true;}Thread.Sleep(200);}
             }
             if(network==null)throw new IOException("手机接收端未就绪，请解锁手机并保持 App 在前台");
-            network.WriteTimeout=2000;network.ReadTimeout=10000;Wire.Hello(network);
+            network.WriteTimeout=2000;network.ReadTimeout=10000;Wire.Hello(network,options.Width,options.Height,options.FrameRate);
             if(Encoding.ASCII.GetString(Wire.Exact(network,8))!="WCODEC01")throw new IOException("手机解码器初始化失败或 V2 协议不匹配");
             // Tab S4 accepts the codec configuration before it schedules the
             // LocalSocket reader at full speed after a foreground launch.
@@ -208,8 +220,8 @@ namespace WiredScreen {
             string logs=Path.Combine(root,"logs");Directory.CreateDirectory(logs);
             string reportPath=Path.Combine(logs,"usb-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".jsonl");
             report=new StreamWriter(reportPath,false,Encoding.UTF8){AutoFlush=true};
-            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=3,streamProfile=options.FreshnessV2?"freshness-v2":"stable-v1",transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.Native?"idd-d3d11-mf":options.GpuFrames&&codec=="h264_nvenc"?"d3d11-cuda-nvenc":options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=1920,height=1080,targetFps=60,gop=options.FreshnessV2?120:60,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)}));
-            Log("USB 视频通道已连接。"+(options.FreshnessV2?"低延迟 V2":"稳定 V1")+" · 编码器 "+codec+"，目标 1920×1080 / 60 fps。");Log("测量记录："+reportPath);
+            report.WriteLine(new JavaScriptSerializer().Serialize(new{type="session",schemaVersion=4,streamProfile=options.FreshnessV2?"freshness-v2":"stable-v1",transport="adb-usb-localabstract",source=options.Source,encoder=codec,pixelPath=options.Native?"idd-d3d11-mf":options.GpuFrames&&codec=="h264_nvenc"?"d3d11-cuda-nvenc":options.GpuFrames?"d3d11-qsv":"cpu-compatible",width=options.Width,height=options.Height,targetFps=options.FrameRate,gop=options.FreshnessV2?options.FrameRate*2:options.FrameRate,vbvFrames=options.VbvFrames,bitrateMbps=options.Bitrate,adapter=options.Adapter,output=options.Screen,encoderArguments=options.Native?"--stream-driver "+options.Seconds:Arguments(options,codec)}));
+            Log("USB 视频通道已连接。"+(options.FreshnessV2?"低延迟 V2":"稳定 V1")+" · 编码器 "+codec+"，目标 "+options.Width+"×"+options.Height+" / "+options.FrameRate+" fps。");Log("测量记录："+reportPath);
             // Some Android builds do not read their LocalSocket until the
             // first codec output is configured. V2 absorbs that one-time
             // startup burst, then returns to the normal four-frame bound.
@@ -245,9 +257,11 @@ namespace WiredScreen {
                 while(frames.Take(out frame)){
                     if(stopped)break;
                     if(resetPacingOnNextFrame){
-                        // Encoder startup can take hundreds of milliseconds.
-                        // Start its 60 Hz schedule only once its new IDR exists.
-                        pacingStart=Stopwatch.GetTimestamp()-(long)sequence*Stopwatch.Frequency/60;
+                        // Encoder startup can itself take hundreds of
+                        // milliseconds. Start the new frame-rate schedule when its
+                        // first replacement IDR is actually available, not
+                        // when the old encoder was stopped.
+                        pacingStart=Stopwatch.GetTimestamp()-(long)sequence*Stopwatch.Frequency/options.FrameRate;
                         resetPacingOnNextFrame=false;
                     }
                     // Capture APIs can release duplicate desktop frames in a
@@ -255,27 +269,33 @@ namespace WiredScreen {
                     // USB buffer cannot turn that burst into display latency.
                     if(sequence==0)pacingStart=Stopwatch.GetTimestamp();
                     // The native D3D11/MF path has one frame in flight and
-                    // therefore provides its own backpressure. Applying a
-                    // second nominal-60Hz scheduler here accumulates delay
-                    // whenever the desktop source jitters.
-                    long due=options.Native?frame.PacketReadyQpc:pacingStart+(long)sequence*Stopwatch.Frequency/60;
+                    // therefore provides its own backpressure.  Applying a
+                    // second frame-rate scheduler here turns normal source
+                    // jitter into an accumulating send delay.
+                    long due=options.Native?frame.PacketReadyQpc:pacingStart+(long)sequence*Stopwatch.Frequency/options.FrameRate;
                     if(!options.Native)while(!stopped){long remaining=due-Stopwatch.GetTimestamp();if(remaining<=0)break;int wait=(int)(remaining*1000/Stopwatch.Frequency);if(wait>0)Thread.Sleep(Math.Min(wait,10));else Thread.SpinWait(64);}
                     long sendQpc=Stopwatch.GetTimestamp();
                     Wire.Write(network,1,sequence,sendQpc,frame.Data);Interlocked.Increment(ref sent);
                     long writeDoneQpc=Stopwatch.GetTimestamp();
                     lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="send",sequence=sequence,packetBytes=frame.Data.Length,packetReadyQpc=frame.PacketReadyQpc,sendQpc=sendQpc,writeDoneQpc=writeDoneQpc,targetSendQpc=due,qpcFrequency=Stopwatch.Frequency,scheduleErrorMs=(sendQpc-due)*1000.0/Stopwatch.Frequency,readyToSendMs=(sendQpc-frame.PacketReadyQpc)*1000.0/Stopwatch.Frequency,writeMs=(writeDoneQpc-sendQpc)*1000.0/Stopwatch.Frequency}));}
                     if(options.Native){lock(gate){if(report!=null)report.WriteLine(new JavaScriptSerializer().Serialize(new{type="native-frame",sequence=sequence,sourceSequence=frame.SourceSequence,capturedQpc=frame.CapturedQpc,encodedQpc=frame.EncodedQpc,sendQpc=sendQpc,qpcFrequency=frame.Frequency,captureToEncodedMs=(frame.EncodedQpc-frame.CapturedQpc)*1000.0/frame.Frequency,encodedToSendMs=(sendQpc-frame.EncodedQpc)*1000.0/frame.Frequency}));}}
-                    if(sequence%60==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
-                    // The decoder needs a small output cadence window after
-                    // its first IDR. Once frame zero has reached the Surface,
-                    // replace that startup generation with a fresh IDR and
-                    // throw its queued history away.
-                    if(options.FreshnessV2&&sequence==6){
+                    if(sequence%options.FrameRate==0)Wire.Write(network,2,sequence,Stopwatch.GetTimestamp(),new byte[0]);sequence++;
+                    // Tab S4's decoder accepts the IDR immediately, but does
+                    // not release that first picture to SurfaceFlinger until a
+                    // few following samples establish its output cadence.
+                    // Keep this window to about 100 ms of samples, then
+                    // discard it all once frame zero is actually displayed.
+                    if(options.FreshnessV2&&sequence==Math.Max(3,options.FrameRate/10)){
                         Log("V2 初始化窗口已发送；等待手机确认首帧显示后切换到最新关键帧。");
                         if(!bootstrapRendered.Wait(5000))throw new IOException("手机未确认显示启动帧，未进入低延迟正式传输。");
                         Log("V2 启动帧已显示；丢弃启动积压并重启编码器生成新的关键帧。");
                         EncodedFrameQueue oldFrames=frames;oldFrames.Discard();StopEncoderGeneration(reader);
                         if(stopped)break;
+                        // The first encoder stopped while the first picture was
+                        // displayed. Its clock is no longer meaningful: retain
+                        // sequence numbers for decoder PTS, while making the
+                        // replacement IDR due now rather than burst-sending a
+                        // backlog to catch up with the old clock.
                         resetPacingOnNextFrame=true;
                         frames=new EncodedFrameQueue(4);stderr="";reader=StartEncoderReader(options,codec,frames);
                     }

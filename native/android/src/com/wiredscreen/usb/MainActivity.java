@@ -22,7 +22,6 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -34,8 +33,8 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,8 +46,9 @@ import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final int MAX_PACKET=4*1024*1024;
-    // Keep one foreground ADB endpoint across PC reconnects. Per-session
-    // socket names race with decoder shutdown after a cable/session break.
+    // One stable ADB localabstract endpoint lets a foreground app accept the
+    // next PC connection after a disconnect. Per-session socket names made
+    // reconnect depend on a fragile Activity restart race.
     private static final String USB_ENDPOINT="wiredscreen_usb";
     private final Handler ui=new Handler(Looper.getMainLooper());
     private LatestFrameEglView video;
@@ -183,7 +183,7 @@ public class MainActivity extends Activity {
         byte[] magic=new byte[8];hello.get(magic);
         if(!new String(magic,StandardCharsets.US_ASCII).equals("WSCREEN2"))throw new IOException("协议不匹配，请同时更新电脑和手机 App");
         int width=hello.getInt(),height=hello.getInt(),fps=hello.getInt(),format=hello.getInt(),revision=hello.getInt();
-        if(width!=1920||height!=1080||fps!=60||format!=1)throw new IOException("不支持的画面参数");
+        if(width<640||width>2560||height<360||height>1600||fps<24||fps>60||format!=1)throw new IOException("不支持的画面参数");
         final MediaCodec decoder=MediaCodec.createDecoderByType("video/avc");
         final String decoderName=decoder.getName();
         MediaFormat config=MediaFormat.createVideoFormat("video/avc",width,height);
@@ -207,6 +207,7 @@ public class MainActivity extends Activity {
                 if(item!=null)packet(out,item.type,item.sequence,item.stamp,item.data);
             }}catch(Exception ignored){reporting.set(false);try{socket.close();}catch(Exception ignoredClose){}}
         },"usb-telemetry");
+        video.setDecoderBufferSize(width,height);
         Surface decoderSurface=video.getDecoderSurface();
         if(decoderSurface==null)throw new IOException("EGL 渲染表面尚未就绪");
         decoder.configure(config,decoderSurface,null,0);
@@ -268,7 +269,7 @@ public class MainActivity extends Activity {
                         data=initial.picture;initialized=true;
                         Log.i("WiredScreen","AVC initialization: codec-config submitted before IDR");
                     }
-                    long pts=(long)sequence*1000000/60;
+                    long pts=(long)sequence*1000000/fps;
                     // Older Android versions may omit callbacks. Bound diagnostic
                     // state independently of the decoder; never drop video here.
                     if(frameTimes.size()>=256)frameTimes.clear();
@@ -300,7 +301,8 @@ public class MainActivity extends Activity {
                     outbound.offer(new Outbound(4,sequence,stamp,stats.toString().getBytes(StandardCharsets.UTF_8)));
                     inputWaitNs=0;inputWaitMaxNs=0;inputSamples=0;
                     String diagnostic=String.format(java.util.Locale.US,"解码 %.1f / 呈现回调 %.1f fps\n%s\n低延迟模式：%s",decodeFps,renderFps,decoderName,low?"开启":"未提供");
-                    ui.post(()->{status.setText("已连接 · USB 直连\n1920 × 1080 · 目标 60 帧");details.setText(diagnostic);controls.setText("控制");controls.setTextColor(Color.rgb(181,239,218));controls.setContentDescription("USB 已连接。展开副屏控制面板");});
+                    final String streamLabel=width+" × "+height+" · 目标 "+fps+" 帧";
+                    ui.post(()->{status.setText("已连接 · USB 直连\n"+streamLabel);details.setText(diagnostic);controls.setText("控制");controls.setTextColor(Color.rgb(181,239,218));controls.setContentDescription("USB 已连接。展开副屏控制面板");});
                     last=now;lastDecoded=d;lastRendered=r;lastBytes=received;
                 }
             }
@@ -308,9 +310,10 @@ public class MainActivity extends Activity {
     }
 }
 
-// MediaCodec writes into an external GL texture.  Frame callbacks mark work
-// pending; the EGL thread draws one current texture and coalesces callbacks
-// received while it was busy, avoiding a Java-side bitmap or view copy.
+// MediaCodec writes directly into a SurfaceTexture backed by an external GL
+// texture.  Its frame callback merely marks work pending; the EGL thread draws
+// one current texture and naturally coalesces any callbacks received while it
+// was busy.  This avoids adding a Java-side bitmap or TextureView copy.
 final class LatestFrameEglView extends GLSurfaceView implements GLSurfaceView.Renderer, SurfaceTexture.OnFrameAvailableListener {
     interface Ready { void run(); }
     private final Ready readyCallback;
@@ -329,6 +332,7 @@ final class LatestFrameEglView extends GLSurfaceView implements GLSurfaceView.Re
     }
     boolean isDecoderSurfaceReady(){return decoderSurface!=null;}
     Surface getDecoderSurface(){return decoderSurface;}
+    void setDecoderBufferSize(int width,int height){SurfaceTexture source=decoderTexture;if(source!=null)source.setDefaultBufferSize(width,height);}
     private static int shader(int type,String source){
         int handle=GLES20.glCreateShader(type);GLES20.glShaderSource(handle,source);GLES20.glCompileShader(handle);int[] ok=new int[1];GLES20.glGetShaderiv(handle,GLES20.GL_COMPILE_STATUS,ok,0);if(ok[0]==0)throw new IllegalStateException("EGL shader: "+GLES20.glGetShaderInfoLog(handle));return handle;
     }
